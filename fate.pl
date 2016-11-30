@@ -10,7 +10,7 @@ use Getopt::Std;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.1.0.0";	# ソフトウェアのバージョン
+my $version = "ver.1.0.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding genes by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -220,6 +220,9 @@ sub body {
 	if ($opt{"o"} !~ /^\d+$/) {&exception::error("specify INT >= 0: -o $opt{o}");}
 	if ($opt{"l"} !~ /^\d+$/) {&exception::error("specify INT >= 0: -l $opt{l}");}
 	if ($opt{"c"} !~ /^\d+$|^\d+\.\d+$|^\d+[eE]-?\d+$|^\d+\.\d+[eE]-?\d+$/ or $opt{"c"} > 1) {&exception::error("specify NUM 0-1: -c $opt{c}");}
+	
+	# 依存するソフトウェアがインストールされているか確認
+	if ($opt{"g"} and !`which $opt{"g"}`) {&exception::error("$opt{g} not installed");}
 	
 	# ゲノム配列のfastaファイル名を取得
 	my $genome_file = shift(@ARGV);
