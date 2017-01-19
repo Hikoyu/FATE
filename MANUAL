@@ -1,5 +1,5 @@
 ========================================
-Abridged User's Manual of FATE ver.1.0.1
+Abridged User's Manual of FATE ver.1.0.2
 ========================================
 
 System Requirements
@@ -48,7 +48,7 @@ $ fate.pl <command> [option] [input] [> output] [2> log]
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.1.0.1
+fate.pl ver.1.0.2
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.

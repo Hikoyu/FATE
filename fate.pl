@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-# Copyright (c) 2016 Hikoyu Suzuki
+# Copyright (c) 2016-2017 Hikoyu Suzuki
 # This software is released under the MIT License.
 
 use strict;
@@ -10,7 +10,7 @@ use Getopt::Std;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.1.0.1";	# ソフトウェアのバージョン
+my $version = "ver.1.0.2";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding genes by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -763,7 +763,7 @@ sub body {
 						if ($locus->{"num_connection"}) {next;}
 						
 						# 親プロセスにbed12形式でデータを送信
-						syswrite($output, join("\t", ($subject, $locus->{"locus_start"}, $locus->{"locus_destination"}, $query, $locus->{"score"}, $locus->{"strand"} > 0 ? "+" : "-", $locus->{"locus_start"}, $locus->{"locus_destination"}, ".", scalar(@{$locus->{"block_size"}}), join(",", @{$locus->{"block_size"}}), join(",", map {$_ - $locus->{"locus_start"}} @{$locus->{"block_start"}}))) . "\n$subject\n");
+						syswrite($output, join("\t", ($subject, $locus->{"locus_start"}, $locus->{"locus_destination"}, $query, $locus->{"total_score"}, $locus->{"strand"} > 0 ? "+" : "-", $locus->{"locus_start"}, $locus->{"locus_destination"}, ".", scalar(@{$locus->{"block_size"}}), join(",", @{$locus->{"block_size"}}), join(",", map {$_ - $locus->{"locus_start"}} @{$locus->{"block_start"}}))) . "\n$subject\n");
 						
 						# 領域数を加算
 						$num_loci++;
