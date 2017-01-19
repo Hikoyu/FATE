@@ -1,5 +1,5 @@
 ========================================
-Abridged User's Manual of FATE ver.1.1.0
+Abridged User's Manual of FATE ver.1.2.0
 ========================================
 
 System Requirements
@@ -10,7 +10,7 @@ macOS or Linux
 Software Requirements
 ---------------------
 perl		5.8 or later
-blast+		2.2.18 or later	ftp://ftp.ncbi.nlm.nih.gov/blast/executables/LATEST/
+blast+		2.2.30 or later	ftp://ftp.ncbi.nlm.nih.gov/blast/executables/LATEST/
 exonerate	2.4.0		ftp://ftp.ebi.ac.uk/pub/software/vertebrategenomics/exonerate/
 wise2		2.4.1		http://www.ebi.ac.uk/~birney/wise2/
 
@@ -47,7 +47,7 @@ $ fate.pl <command> [option] [input] [> output] [2> log]
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.1.1.0
+fate.pl ver.1.2.0
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.
@@ -76,7 +76,7 @@ Options:
   -c NUM 	Minimum query coverage to regard as complete CDS <0-1> [0.85]
   -f STR 	Output format <bed|gtf> [bed]
   -g STR 	Gene prediction engine <exonerate|genewise>
-  -h STR 	Homology search engine <tblastn|blastn|dc-megablast|megablast> [blastn]
+  -h STR 	Homology search engine <tblastn|tblastn-fast|blastn|dc-megablast|megablast> [blastn]
   -i INT 	Maximum interval length allowed to assemble initial hits [100000]
   -l INT 	Minimum length to regard as complete CDS <0-> [0]
   -n STR 	Prefix of each locus name [locus]
@@ -118,7 +118,7 @@ Options:
   -d PATH 	Path to gene or protein database file (fasta format)
   -f STR 	Output format <bed|gtf> [bed]
   -g PATH 	Path to target genome data file (fasta format)
-  -h STR 	Homology search engine <blastx|blastn|dc-megablast|megablast> [blastx]
+  -h STR 	Homology search engine <blastx|blastx-fast|blastn|dc-megablast|megablast> [blastx]
   -k STR 	Keywords for filtering (AND[&], OR[;], BUT[!])
   -n STR 	Prefix of each locus name [locus]
   -p INT 	Number of parallel processes <1-> [1]

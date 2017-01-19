@@ -10,7 +10,7 @@ use Getopt::Std;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.1.1.0";	# ソフトウェアのバージョン
+my $version = "ver.1.2.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding genes by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -198,7 +198,7 @@ sub define {
 	$usage = "<genome.fa> <STDIN | in1.fa> [in2.fa ...] [> out.bed | > out.gtf]";
 	$option{"s"} = "\tForce GT-AG rule for splice junctions";
 	$option{"g STR "} = "Gene prediction engine <exonerate|genewise>";
-	$option{"h STR "} = "Homology search engine <tblastn|blastn|dc-megablast|megablast> [blastn]";
+	$option{"h STR "} = "Homology search engine <tblastn|tblastn-fast|blastn|dc-megablast|megablast> [blastn]";
 	$option{"5 INT "} = "Length of 5' flanking region <0-> [300]";
 	$option{"3 INT "} = "Length of 3' flanking region <0-> [300]";
 	$option{"i INT "} = "Maximum interval length allowed to assemble initial hits [100000]";
@@ -212,7 +212,7 @@ sub define {
 sub body {
 	# 指定されたオプションを確認
 	if ($opt{"g"} and $opt{"g"} ne "exonerate" and $opt{"g"} ne "genewise") {&exception::error("unknown engine specified: -g $opt{g}");}
-	if ($opt{"h"} ne "tblastn" and $opt{"h"} ne "blastn" and $opt{"h"} ne "dc-megablast" and $opt{"h"} ne "megablast") {&exception::error("unknown engine specified: -h $opt{h}");}
+	if ($opt{"h"} ne "tblastn" and $opt{"h"} ne "tblastn-fast" and $opt{"h"} ne "blastn" and $opt{"h"} ne "dc-megablast" and $opt{"h"} ne "megablast") {&exception::error("unknown engine specified: -h $opt{h}");}
 	if ($opt{"s"} and !$opt{"g"}) {&exception::caution("-s ignored under -g unspecified");}
 	if ($opt{"5"} !~ /^\d+$/) {&exception::error("specify INT >= 0: -5 $opt{5}");}
 	if ($opt{"3"} !~ /^\d+$/) {&exception::error("specify INT >= 0: -3 $opt{3}");}
@@ -245,8 +245,8 @@ sub body {
 	if (!$opt{"b"}) {&common::check_blastdb($genome_file);}
 	
 	# 処理を定義
-	my $search_engine = $opt{"h"} eq "tblastn" ? "tblastn" : "blastn -task $opt{h}";
-	my $homology_search = "$search_engine -num_threads $opt{p} -outfmt 6 -soft_masking true -db $genome_file";
+	my $search_engine = $opt{"h"} =~ /^tblastn/ ? "tblastn" : "blastn";
+	my $homology_search = "$search_engine -task $opt{h} -num_threads $opt{p} -outfmt 6 -soft_masking true -db $genome_file";
 	my $gene_prediction = $opt{"g"};
 	if ($opt{"g"} and $opt{"g"} eq "exonerate") {
 		$gene_prediction .= " -m protein2genome -V 0 --showtargetgff T --showalignment F --showvulgar F";
@@ -595,8 +595,8 @@ sub body {
 						# クエリー配列長をハッシュに登録
 						$query_len{$query_title} = length($query_seq);
 						
-						# クエリー配列をアミノ酸配列に翻訳 (-h tblastn非指定時)
-						if ($opt{"h"} ne "tblastn") {$query_seq = &common::translate($query_seq, 0);}
+						# クエリー配列をアミノ酸配列に翻訳 (-h tblastn/tblastn-fast非指定時)
+						if ($opt{"h"} ne "tblastn" and $opt{"h"} ne "tblastn-fast") {$query_seq = &common::translate($query_seq, 0);}
 						
 						# クエリー配列からアスタリスクを除去
 						$query_seq =~ s/\*//g;
@@ -781,7 +781,7 @@ sub body {
 							my $assemble = $locus->{"assemble"}->{$assemble_id};
 							
 							# プロセス番号を受信した孫プロセスにbed6形式+マスクブロック情報でデータを送信
-							syswrite($pipe[<$order>], join("\t", ($subject, $locus->{"locus_start"}, $assemble->{"locus_destination"}, $query, $opt{"h"} eq "tblastn" ? $query_len{$query} * 3 : $query_len{$query}, $locus->{"strand"} > 0 ? "+" : "-"), scalar(@{$assemble->{"mask_block_size"}}), join(",", @{$assemble->{"mask_block_size"}}), join(",", @{$assemble->{"mask_block_start"}})) . "\n");
+							syswrite($pipe[<$order>], join("\t", ($subject, $locus->{"locus_start"}, $assemble->{"locus_destination"}, $query, $opt{"h"} =~ /^tblastn/ ? $query_len{$query} * 3 : $query_len{$query}, $locus->{"strand"} > 0 ? "+" : "-"), scalar(@{$assemble->{"mask_block_size"}}), join(",", @{$assemble->{"mask_block_size"}}), join(",", @{$assemble->{"mask_block_start"}})) . "\n");
 							
 							# 領域数を加算
 							$num_loci++;
@@ -892,7 +892,7 @@ sub define {
 	$usage = "<STDIN | in1.bed> [in2.bed ...] [> out.bed | > out.gtf]";
 	$option{"d PATH "} = "Path to gene or protein database file (fasta format)";
 	$option{"g PATH "} = "Path to target genome data file (fasta format)";
-	$option{"h STR "} = "Homology search engine <blastx|blastn|dc-megablast|megablast> [blastx]";
+	$option{"h STR "} = "Homology search engine <blastx|blastx-fast|blastn|dc-megablast|megablast> [blastx]";
 	$option{"k STR "} = "Keywords for filtering (AND[&], OR[;], BUT[!])";
 	$option{"r INT "} = "Cutoff rank of hits <1->";
 	return(1);
@@ -903,7 +903,7 @@ sub body {
 	# 指定されたオプションを確認
 	if ($opt{"b"} and $opt{"d"}) {&exception::error("options incompatible: -b and -d");}
 	if (!$opt{"g"} and $opt{"d"}) {&exception::error("-g required under -d");}
-	if ($opt{"h"} ne "blastx" and $opt{"h"} ne "blastn" and $opt{"h"} ne "dc-megablast" and $opt{"h"} ne "megablast") {&exception::error("unknown engine specified: -h $opt{h}");}
+	if ($opt{"h"} ne "blastx" and $opt{"h"} ne "blastx-fast" and $opt{"h"} ne "blastn" and $opt{"h"} ne "dc-megablast" and $opt{"h"} ne "megablast") {&exception::error("unknown engine specified: -h $opt{h}");}
 	if (defined($opt{"r"}) and ($opt{"r"} !~ /^\d+$/ or $opt{"r"} < 1)) {&exception::error("specify INT >= 1: -r $opt{r}");}
 	
 	# 入力ファイルを確認
@@ -915,8 +915,8 @@ sub body {
 	}
 	
 	# 処理を定義
-	my $search_engine = $opt{"h"} eq "blastx" ? "blastx" : "blastn -task $opt{h}";
-	my $homology_search = "$search_engine -num_threads $opt{p} -outfmt '6 std salltitles' -soft_masking true -strand plus";
+	my $search_engine = $opt{"h"} =~ /^blastx/ ? "blastx" : "blastn";
+	my $homology_search = "$search_engine -task $opt{h} -num_threads $opt{p} -outfmt '6 std salltitles' -soft_masking true -strand plus";
 	$homology_search .= $opt{"d"} ? " -db $opt{d}" : "";
 	$homology_search .= `which tee` ? " | tee fate_filter_$opt{h}.out" : "";
 
@@ -938,7 +938,7 @@ sub body {
 		&common::find_db($opt{"d"});
 		
 		# 参照配列のblastデータベースを確認
-		if ($opt{"h"} eq "blastx") {&common::check_blastdb($opt{"d"}, 1);} else {&common::check_blastdb($opt{"d"});}
+		if ($opt{"h"} eq "blastx" or $opt{"h"} eq "blastx-fast") {&common::check_blastdb($opt{"d"}, 1);} else {&common::check_blastdb($opt{"d"});}
 	}
 	
 	# プロセス間通信のパイプを作成
