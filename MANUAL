@@ -1,5 +1,5 @@
 ========================================
-Abridged User's Manual of FATE ver.1.2.0
+Abridged User's Manual of FATE ver.1.4.0
 ========================================
 
 System Requirements
@@ -47,7 +47,7 @@ $ fate.pl <command> [option] [input] [> output] [2> log]
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.1.2.0
+fate.pl ver.1.4.0
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.
@@ -111,13 +111,12 @@ Functions:
   Filter already annotated protein-coding genes under specified conditions.
 
 Usage:
-  fate.pl filter [options] <STDIN | in1.bed> [in2.bed ...] [> out.bed | > out.gtf]
+  fate.pl filter [options] <genome.fa> <STDIN | in1.bed> [in2.bed ...] [> out.bed | > out.gtf]
 
 Options:
   -b PATH 	Path to blast output file (-outfmt 6) to reuse
   -d PATH 	Path to gene or protein database file (fasta format)
   -f STR 	Output format <bed|gtf> [bed]
-  -g PATH 	Path to target genome data file (fasta format)
   -h STR 	Homology search engine <blastx|blastx-fast|blastn|dc-megablast|megablast> [blastx]
   -k STR 	Keywords for filtering (AND[&], OR[;], BUT[!])
   -n STR 	Prefix of each locus name [locus]
@@ -128,20 +127,20 @@ Options:
 
 Examples:
 1. Search protein database using the sequences of defined loci in the input bed file via blastx, then output the loci which get the hits including 'keyword' in the top 5.
-$ fate.pl filter -d protein.fa -g genome.fa -h blastx -k 'keyword' -r 5 in.bed > out.bed
+$ fate.pl filter -d protein.fa -h blastx -k 'keyword' -r 5 genome.fa in.bed > out.bed
 
 Note: For example, keyword 'hoge&piyo;!foo&!bar' means including both 'hoge' and 'piyo' or including neither 'foo' nor 'bar'.
 
 2. Search nucleotide database using the sequences of defined loci in the input file via blastn, then output the loci which get the hits including 'keyword' in the top 5.
-$ fate.pl filter -d nucleotide.fa -g genome.fa -h blastn -k 'keyword' -r 5 in.bed > out.bed
+$ fate.pl filter -d nucleotide.fa -h blastn -k 'keyword' -r 5 genome.fa in.bed > out.bed
 
 3. Reuse the output file of homology search, then output the loci which get the hits including 'keyword' in the top 5.
-$ fate.pl filter -b fate_filter.out -k 'keyword' -r 5 in.bed > out.bed
+$ fate.pl filter -b fate_filter.out -k 'keyword' -r 5 genome.fa in.bed > out.bed
 
 Note: FATE outputs the results of homology search in customized TSV format (-outfmt '6 std salltitles') as default.
 
 4. Output only functional gene loci in gtf format.
-$ fate.pl filter -f gtf -t 1 in.bed > out.gtf
+$ fate.pl filter -f gtf -t 1 genome.fa in.bed > out.gtf
 
 
 Tips
@@ -154,13 +153,13 @@ ghostx	http://www.bi.cs.titech.ac.jp/ghostx
 ghostz	http://www.bi.cs.titech.ac.jp/ghostz
 
 3. FATE use environment variable 'BLASTDB' if defined. So, you can omit the PATH prefix of genome/protein sequence file. For example, instead of writing as follows:
-$ fate.pl filter -d /path/to/protdb/protein.fa -g /path/to/genomedb/genome.fa -h blastx -k 'keyword' -r 5 in.bed > out.bed
+$ fate.pl filter -d /path/to/protdb/protein.fa -h blastx -k 'keyword' -r 5 /path/to/genomedb/genome.fa in.bed > out.bed
 
 you can simply write as follows:
-$ fate.pl filter -d protein.fa -g genome.fa -h blastx -k 'keyword' -r 5 in.bed > out.bed
+$ fate.pl filter -d protein.fa -h blastx -k 'keyword' -r 5 genome.fa in.bed > out.bed
 
 if you defined 'BLASTDB' as follows:
-$ export BLASTDB="/path/to/protdb:/path/to/genome"
+$ export BLASTDB="/path/to/protdb:/path/to/genomedb"
 
 
 License
