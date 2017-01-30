@@ -10,7 +10,7 @@ use Getopt::Std;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.1.4.0";	# ソフトウェアのバージョン
+my $version = "ver.1.4.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding genes by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -358,12 +358,14 @@ sub body {
 					
 					# 変数を宣言
 					my @genes = ();
+					my $query_name = $col[3];
 					my $query_start = 0;
 					my $query_end = 0;
 					my $summary_flag = 0;
 					
 					# 遺伝子構造予測を実行
-					my $args = $opt{"g"} eq "exonerate" ? "-q queries/$col[3].fa -t loci/locus$pnum.fa" : $opt{"g"} eq "genewise" ? "queries/$col[3].fa loci/locus$pnum.fa" : "";
+					$query_name =~ s/\|/\\\|/g;
+					my $args = $opt{"g"} eq "exonerate" ? "-q queries/$query_name.fa -t loci/locus$pnum.fa" : $opt{"g"} eq "genewise" ? "queries/$query_name.fa loci/locus$pnum.fa" : "";
 					open(PREDICT, "-|", "$gene_prediction $args 2>/dev/null") or &exception::error("failed to execute gene prediction: $col[3] vs $locus_name");
 					
 					# 領域開始点をbed形式に戻す
@@ -1383,6 +1385,9 @@ sub body {
 			
 			# アクティブな子プロセスAに残りのデータとデータ区切りを送信
 			if ($last_query) {syswrite($pipe[$active_pnum], "$last_query\n");}
+			
+			# 相同性検索でヒットが得られなかった場合
+			else {&exception::caution("no hits found from $opt{h} search");}
 			
 			# 全ての子プロセスAにデータ転送完了を送信
 			foreach (@pipe) {syswrite($_, "//\n");}
