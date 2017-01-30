@@ -10,7 +10,7 @@ use Getopt::Std;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.1.1.0";	# ソフトウェアのバージョン
+my $version = "ver.1.3.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding genes by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -245,7 +245,7 @@ sub body {
 	if (!$opt{"b"}) {&common::check_blastdb($genome_file);}
 	
 	# 処理を定義
-	my $search_engine = $opt{"h"} eq "tblastn" ? "tblastn" : "blastn -task $opt{h}";
+	my $search_engine = $opt{"h"} =~ /^tblastn/ ? "tblastn" : "blastn -task $opt{h}";
 	my $homology_search = "$search_engine -num_threads $opt{p} -outfmt 6 -soft_masking true -db $genome_file";
 	my $gene_prediction = $opt{"g"};
 	if ($opt{"g"} and $opt{"g"} eq "exonerate") {
@@ -258,59 +258,47 @@ sub body {
 	}
 	$homology_search .= `which tee` ? " | tee fate_search_$opt{h}.out" : "";
 	
-	# フォルダを作成 (-g指定時)
+	# 個々の配列データを保存しておくディレクトリを作成 (-g指定時)
 	if ($opt{"g"}) {
 		if (!-d "queries") {mkdir("queries") or &exception::error("failed to make directory: queries");}
 		if (!-d "loci") {mkdir("loci") or &exception::error("failed to make directory: loci");}
 	}
 	
+	# 変数を宣言
+	my @pid = ();
+	my @pipe = ();
+	
 	# プロセス間通信のパイプを作成
+	my $order = IO::Pipe->new;
 	my $output = IO::Pipe->new;
 	
-	# プロセス分岐
-	my $pid = fork;
-	
-	# プロセス分岐に失敗した場合
-	if (!defined($pid)) {&exception::error("failed to fork process");}
-	
-	## ここから子プロセスの処理 ##
-	if (!$pid) {
-		# 変数を宣言
-		my @pid = ();
-		my @pipe = ();
-		my $pflag = 0;
-		
+	# 指定したプロセス数で並列処理
+	for (my $pnum = 0;$pnum < $opt{"p"};$pnum++) {
 		# プロセス間通信のパイプを作成
-		my $order = IO::Pipe->new;
+		push(@pipe, my $input = IO::Pipe->new);
 		
-		# 指定したプロセス数で並列処理 (-g指定時)
-		for (my $pnum = 0;$pnum < $opt{"p"} and $opt{"g"};$pnum++) {
-			# プロセス間通信のパイプを作成
-			push(@pipe, my $input = IO::Pipe->new);
+		# プロセス分岐
+		$pid[$pnum] = fork;
+		
+		# プロセス分岐に失敗した場合
+		if (!defined($pid[$pnum])) {&exception::error("failed to fork process");}
+		
+		## ここから子プロセスAの処理 ##
+		if (!$pid[$pnum]) {
+			# パイプを開く
+			$order->writer;
+			$output->writer;
+			$input->reader;
 			
-			# プロセス分岐
-			$pid[$pnum] = fork;
+			# 子プロセスCにプロセス番号を送信
+			syswrite($order, "$pnum\n");
 			
-			# プロセス分岐に失敗した場合
-			if (!defined($pid[$pnum])) {$pflag = 1;last;}
-			
-			## ここから孫プロセスの処理 ##
-			if (!$pid[$pnum]) {
-				# 相同性検索の出力を閉じる
-				close(SEARCH_OUT);
-				
-				# パイプを開く
-				$output->writer;
-				$order->writer;
-				$input->reader;
-				
+			# 遺伝子構造予測を実行 (-g指定時)
+			if ($opt{"g"}) {
 				# ゲノム配列のfastaファイルを開く
 				open(GENOME, "<", $genome_file) or &exception::error("failed to open file: $genome_file");
 				
-				# 子プロセスにデータ要求を送信
-				syswrite($order, "$pnum\n");
-				
-				# 子プロセスから領域データを受信し、遺伝子予測を実行
+				# 子プロセスCから領域データを受信し、遺伝子構造予測を実行
 				while (<$input>) {
 					# 改行コードを除去
 					chomp;
@@ -318,23 +306,25 @@ sub body {
 					# タブ文字でデータを分割
 					my @col = split(/\t/);
 					
+					# 1列のデータを受信した場合
+					if (@col == 1) {last;}
+					
 					# マスクブロックサイズとマスクブロック開始点リストを取得
 					my @mask_block_size = $col[6] ? split(/,/, $col[7]) : ();
 					my @mask_block_start = $col[6] ? split(/,/, $col[8]) : ();
 					
 					# フランキング配列長に合わせて開始点と終了点を修正
-					my $locus_start = $col[5] eq "+" ? $col[1] - $opt{"5"} : $col[1] - $opt{"3"};
-					my $locus_end = $col[5] eq "+" ? $col[2] + $opt{"3"} : $col[2] + $opt{"5"};
+					my $locus_start = $col[5] > 0 ? $col[1] - $opt{"5"} : $col[1] - $opt{"3"};
+					my $locus_end = $col[5] > 0 ? $col[2] + $opt{"3"} : $col[2] + $opt{"5"};
 					if ($locus_start < 0) {$locus_start = 0;}
 					if ($locus_end > $genome_faidx->{$col[0]}->{"seq_length"}) {$locus_end = $genome_faidx->{$col[0]}->{"seq_length"};}
 					
 					# 取り出す領域の位置情報を算出
-					my $root = $genome_faidx->{$col[0]};
-					my $start_point = int($locus_start / $root->{"row_width"}) * $root->{"row_bytes"} + $locus_start % $root->{"row_width"};
-					my $end_point = int($locus_end / $root->{"row_width"}) * $root->{"row_bytes"} + $locus_end % $root->{"row_width"};
+					my $start_point = int($locus_start / $genome_faidx->{$col[0]}->{"row_width"}) * $genome_faidx->{$col[0]}->{"row_bytes"} + $locus_start % $genome_faidx->{$col[0]}->{"row_width"};
+					my $end_point = int($locus_end / $genome_faidx->{$col[0]}->{"row_width"}) * $genome_faidx->{$col[0]}->{"row_bytes"} + $locus_end % $genome_faidx->{$col[0]}->{"row_width"};
 					
 					# 領域の塩基配列を取得
-					seek(GENOME, $root->{"seq_start"} + $start_point, 0);
+					seek(GENOME, $genome_faidx->{$col[0]}->{"seq_start"} + $start_point, 0);
 					read(GENOME, my $locus_seq, $end_point - $start_point);
 					
 					# 改行コードを除去
@@ -347,16 +337,20 @@ sub body {
 					for (my $i = 0;$i < $col[6];$i++) {substr($locus_seq, $mask_block_start[$i] - $locus_start, $mask_block_size[$i]) = "N" x $mask_block_size[$i];}
 					
 					# 相補鎖に変換
-					if ($col[5] eq "-") {&common::complementary($locus_seq);}
+					if ($col[5] < 0) {&common::complementary($locus_seq);}
 					
 					# 領域開始点を表示形式に合わせる
 					$locus_start++;
+					
+					# 領域名を定義
+					my $locus_name = "$col[0]:$locus_start-$locus_end(";
+					$locus_name .= $col[5] > 0 ? "+)" : "-)";
 					
 					# 領域の配列ファイルを作成
 					open(LOCUS, ">", "loci/locus$pnum.fa") or &exception::error("failed to make file: loci/locus$pnum.fa");
 					
 					# 取得した配列をファイルに出力
-					print LOCUS ">$col[0]:$locus_start-$locus_end($col[5])\n";
+					print LOCUS ">$locus_name\n";
 					for (my $pos = 0;$pos < length($locus_seq);$pos += 60) {print LOCUS substr($locus_seq, $pos, 60), "\n";}
 					
 					# 領域の配列ファイルを閉じる
@@ -368,14 +362,14 @@ sub body {
 					my $query_end = 0;
 					my $summary_flag = 0;
 					
-					# 遺伝子予測を実行
+					# 遺伝子構造予測を実行
 					my $args = $opt{"g"} eq "exonerate" ? "-q queries/$col[3].fa -t loci/locus$pnum.fa" : $opt{"g"} eq "genewise" ? "queries/$col[3].fa loci/locus$pnum.fa" : "";
-					open(PREDICT, "-|", "$gene_prediction $args 2>/dev/null") or &exception::error("failed to execute gene prediction: $col[0]:$locus_start-$locus_end($col[5]) vs $col[3]");
+					open(PREDICT, "-|", "$gene_prediction $args 2>/dev/null") or &exception::error("failed to execute gene prediction: $col[3] vs $locus_name");
 					
 					# 領域開始点をbed形式に戻す
 					$locus_start--;
 					
-					# 遺伝子予測結果を1行ずつ読み込んで処理
+					# 遺伝子構造予測結果を1行ずつ読み込んで処理
 					while (<PREDICT>) {
 						# コメント行を除外
 						if (substr($_, 0, 1) eq "#") {$summary_flag = 1;next;}
@@ -418,7 +412,7 @@ sub body {
 						}
 					}
 					
-					# 遺伝子予測を終了
+					# 遺伝子構造予測を終了
 					close(PREDICT);
 					
 					# 翻訳領域を推定
@@ -430,14 +424,14 @@ sub body {
 						
 						# Nを含まない上流配列を取得し、その長さが指定値より短い場合は5'側truncateとする
 						my $upstream_seq = substr(substr($locus_seq, 0, $gene->[1]), -$opt{"5"});
-						my $upstream_offset = $col[5] eq "+" ? $col[1] - $locus_start - $gene->[1] : $locus_end - $gene->[1] - $col[2];
+						my $upstream_offset = $col[5] > 0 ? $col[1] - $locus_start - $gene->[1] : $locus_end - $gene->[1] - $col[2];
 						if ($upstream_offset < 0) {$upstream_offset = 0;}
 						$upstream_seq =~ s/^.*N//;
 						if (length($upstream_seq) < $opt{"5"} - $upstream_offset) {$upstream_truncation = 1;}
 						
 						# Nを含まない下流配列を取得し、その長さが指定値より短い場合は3'側truncateとする
 						my $downstream_seq = substr($locus_seq, $gene->[2], $opt{"3"});
-						my $downstream_offset = $col[5] eq "+" ? $locus_start + $gene->[2] - $col[2] : $col[1] - $locus_end + $gene->[2];
+						my $downstream_offset = $col[5] > 0 ? $locus_start + $gene->[2] - $col[2] : $col[1] - $locus_end + $gene->[2];
 						if ($downstream_offset < 0) {$downstream_offset = 0;}
 						$downstream_seq =~ s/N.*$//;
 						if (length($downstream_seq) < $opt{"3"} - $downstream_offset) {$downstream_truncation = 1;}
@@ -516,136 +510,209 @@ sub body {
 						else {$gene->[8] = "blue";}
 						
 						# ゲノム配列の座標で修正
-						($gene->[1], $gene->[2]) = ($col[5] eq "+" ? $locus_start + $gene->[1] : $locus_end - $gene->[2], $col[5] eq "+" ? $locus_start + $gene->[2] : $locus_end - $gene->[1]);
+						($gene->[1], $gene->[2]) = ($col[5] > 0 ? $locus_start + $gene->[1] : $locus_end - $gene->[2], $col[5] > 0 ? $locus_start + $gene->[2] : $locus_end - $gene->[1]);
 						($gene->[6], $gene->[7]) = ($gene->[1], $gene->[2]);
 						$gene->[5] = $col[5];
-						if ($col[5] eq "-") {
+						if ($col[5] < 0) {
 							$gene->[10] = [reverse(@{$gene->[10]})];
 							$gene->[11] = [reverse(@{$gene->[11]})];
 							for (my $i = 0;$i < @{$gene->[11]};$i++) {$gene->[11]->[$i] = $gene->[2] - $gene->[1] - $gene->[10]->[$i] - $gene->[11]->[$i];}
 						}
 						
-						# 親プロセスにbed12形式でデータを送信
+						# 子プロセスBにbed12形式でデータを送信
 						syswrite($output, join("\t", (@{$gene}[0..9], join(",", @{$gene->[10]}), join(",", @{$gene->[11]}))) . "\n");
 					}
 					
-					# 親プロセスに染色体、連鎖群、スキャフォールドまたはコンティグ名を送信
-					syswrite($output, "$col[0]\n");
+					# 子プロセスBにデータ区切りを送信
+					syswrite($output, "$locus_name\n");
 					
-					# 子プロセスにプロセス番号を送信
+					# 子プロセスCにプロセス番号を送信
 					syswrite($order, "$pnum\n");
 				}
 				
 				# ゲノム配列のfastaファイルを閉じる
 				close(GENOME);
 				
-				# プロセスを終了
-				exit 0;
+				# 子プロセスBにデータ転送完了を送信
+				syswrite($output, "//\n");
 			}
-			## ここまで孫プロセスの処理 ##
-		}
-		
-		# プロセス分岐に失敗していた場合
-		if ($pflag) {&exception::error("failed to fork process");}
-		
-		# 相同性検索の出力ファイルを開く (-b指定時)
-		if ($opt{"b"}) {open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}");}
-		
-		# 相同性検索を実行
-		else {main::open2(*SEARCH_OUT, *SEARCH_IN, $homology_search) or &exception::error("failed to execute homology search");}
-		
-		# 変数を宣言
-		my %query_len = ();
-		
-		# プロセス間通信のパイプを作成
-		my $query_report = IO::Pipe->new;
-		
-		# プロセス分岐
-		my $pid = fork;
-		
-		# プロセス分岐に失敗した場合
-		if (!defined($pid)) {&exception::error("failed to fork process");}
-		
-		## ここから孫プロセスの処理 ##
-		if (!$pid) {
-			# 相同性検索の出力を閉じる
-			close(SEARCH_OUT);
 			
 			# 変数を宣言
-			my $query_title = "";
-			my $query_seq = "";
+			my @loci = ();
 			
-			# クエリー配列を読み込みながら処理
-			while (my $line = <>) {
+			# 子プロセスBからbedデータを受信しながらアイソフォームを決定
+			while (<$input>) {
 				# 改行コードを除去
-				$line =~ s/\n|\r//g;
+				chomp;
 				
-				# 配列行の処理
-				$query_seq .= $line =~ /^>/ ? "" : uc($line);
+				# タブ文字でデータを分割
+				my @col = split(/\t/);
 				
-				# ID行の処理
-				if ($line =~ /^>/ or eof) {
-					if ($query_title) {
-						# クエリー配列を相同性検索に入力 (-b未指定時)
-						if (!$opt{"b"}) {
-							print SEARCH_IN ">$query_title\n";
-							for (my $pos = 0;$pos < length($query_seq);$pos += 60) {print SEARCH_IN substr($query_seq, $pos, 60), "\n";}
-						}
-						
-						# クエリー配列長をハッシュに登録
-						$query_len{$query_title} = length($query_seq);
-						
-						# クエリー配列をアミノ酸配列に翻訳 (-h tblastn非指定時)
-						if ($opt{"h"} ne "tblastn") {$query_seq = &common::translate($query_seq, 0);}
-						
-						# クエリー配列からアスタリスクを除去
-						$query_seq =~ s/\*//g;
-						
-						# クエリー配列をファイルに出力 (-g指定時)
-						if ($opt{"g"}) {
-							# 出力ファイルを作成
-							open(QUERY, ">", "queries/$query_title.fa") or &exception::error("failed to make file: queries/$query_title.fa");
-							
-							# クエリー配列をfasta形式で個別のファイルに出力
-							print QUERY ">$query_title\n";
-							for (my $pos = 0;$pos < length($query_seq);$pos += 60) {print QUERY substr($query_seq, $pos, 60), "\n";}
-							
-							# 出力ファイルを閉じる
-							close(QUERY);
-						}
+				# 1列のデータを受信した場合
+				if (@col == 1) {
+					# データ転送完了を受信した場合
+					if ($col[0] eq "//") {last;}
+					
+					# 遺伝子を分離
+					my $genes = &common::define_isoforms(\@loci, $opt{"v"}, $opt{"t"});
+					
+					# 親プロセスにデータを送信
+					foreach my $gene (@{$genes}) {
+						syswrite($output, "$col[0]\t" . join("\t", @{$gene->[0]}) . "\n");
+						foreach my $isoform (@{$gene->[1]}) {syswrite($output, "$col[0]\t" . join("\t", @{$isoform}[0..9]) . "\t" . join(",", @{$isoform->[10]}) . "\t" . join(",", @{$isoform->[11]}) . "\n");}
 					}
 					
-					# ID行の最初の空白文字の前までをタイトルとして登録
-					($query_title) = split(/\s/, substr($line, 1));
+					# 親プロセスに通し番号を送信
+					syswrite($output, "$col[0]\n");
 					
-					# 配列をリセット
-					$query_seq = "";
+					# リストをリセット
+					@loci = ();
+					
+					# 子プロセスBにプロセス番号を送信
+					syswrite($order, "$pnum\n");
+					next;
 				}
+				
+				# ブロック情報をリストに変換
+				$col[10] = [split(/,/, $col[10])];
+				$col[11] = [split(/,/, $col[11])];
+				
+				# データをリストに追加
+				push(@loci, \@col);
 			}
-			
-			# 相同性検索への入力を閉じる (-b未指定時)
-			if (!$opt{"b"}) {close(SEARCH_IN);}
-			
-			# パイプを開く
-			$query_report->writer;
-			
-			# 子プロセスにクエリー配列長データを送信
-			foreach (keys(%query_len)) {syswrite($query_report, "$_\t$query_len{$_}\n");}
 			
 			# プロセスを終了
 			exit 0;
 		}
-		## ここまで孫プロセスの処理 ##
+		## ここまで子プロセスAの処理 ##
+	}
+	
+	# プロセス間通信のパイプを作成
+	my $signal = IO::Pipe->new;
+	
+	# プロセス分岐
+	$pid[$opt{"p"}] = fork;
+	
+	# プロセス分岐に失敗した場合
+	if (!defined($pid[$opt{"p"}])) {&exception::error("failed to fork process");}
+	
+	## ここから子プロセスBの処理 ##
+	if (!$pid[$opt{"p"}]) {
+		# パイプを開く
+		$output->reader;
 		
+		# 変数を宣言
+		my %loci = ();
+		my $fin_loci = 0;
+		my $fin_procs = 0;
+		
+		# 子プロセスCからアセンブルID数を受信
+		my $num_loci = <$output>;
+		
+		# 子プロセスAまたはCからデータを受信してハッシュに登録
+		print STDERR $opt{"g"} ? "Running gene prediction...0%" : "Loading assembled loci...";
+		while (<$output>) {
+			# タブ文字でデータを分割
+			my @col = split(/\t/);
+			
+			# 1列のデータを受信した場合
+			if (@col == 1) {
+				# データ転送完了を受信した場合
+				if ($col[0] eq "//\n") {
+					$fin_procs++;
+					if ($opt{"g"} and $fin_procs < $opt{"p"}) {next;}
+					else {last;}
+				}
+				
+				# データ区切りを受信した場合
+				else {
+					$fin_loci++;
+					print STDERR "\rRunning gene prediction...", int($fin_loci / $num_loci * 100), "%";
+					next;
+				}
+			}
+			
+			# bed形式のデータをハッシュに登録
+			push(@{$loci{$col[0]}}, $_);
+		}
+		print STDERR $opt{"g"} ? "\rRunning gene prediction...completed\n" : "completed\n";
+		
+		# パイプを開く
+		$signal->writer;
+		
+		# 子プロセスCにシグナルを受信
+		syswrite($signal, "//\n");
+		
+		# 変数を宣言
+		my $active_pnum = 0;
+		my $fin_chr = 0;
+		my $num_chr = keys(%loci);
+		
+		# パイプを開く
+		$order->reader;
+		foreach (@pipe) {$_->writer;}
+		
+		# ゲノムデータのID順に処理
+		print STDERR "Running isoform definition...0%";
+		foreach my $subject (sort {$genome_faidx->{$a}->{"id_order"} <=> $genome_faidx->{$b}->{"id_order"}} keys(%loci)) {
+			# 子プロセスAからプロセス番号を受信
+			$active_pnum = <$order>;
+			
+			# アクティブな子プロセスAにbed12形式でデータを送信
+			foreach (@{$loci{$subject}}) {syswrite($pipe[$active_pnum], $_);}
+			
+			# アクティブな子プロセスAに通し番号を送信
+			syswrite($pipe[$active_pnum], "$fin_chr\n");
+			
+			# 通し番号を加算
+			$fin_chr++;
+			
+			# 経過を表示
+			print STDERR "\rRunning isoform definition...", int($fin_chr / $num_chr * 100), "%";
+		}
+		print STDERR "\rRunning isoform definition...completed\n";
+		
+		# 全ての子プロセスAにデータ転送完了を送信
+		foreach (@pipe) {syswrite($_, "//\n");}
+		
+		# プロセスを終了
+		exit 0;
+	}
+	## ここまで子プロセスBの処理 ##
+	
+	# 相同性検索の出力ファイルを開く (-b指定時)
+	if ($opt{"b"}) {open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}");}
+	
+	# 相同性検索を実行 (-b未指定時)
+	else {main::open2(*SEARCH_OUT, *SEARCH_IN, $homology_search) or &exception::error("failed to execute homology search");}
+	
+	# プロセス間通信のパイプを作成
+	my $report = IO::Pipe->new;
+	
+	# プロセス分岐
+	my $pid = fork;
+	
+	# プロセス分岐に失敗した場合
+	if (!defined($pid)) {&exception::error("failed to fork process");}
+	
+	## ここから子プロセスCの処理 ##
+	if (!$pid) {
 		# 相同性検索への入力を閉じる (-b未指定時)
 		if (!$opt{"b"}) {close(SEARCH_IN);}
 		
 		# 変数を宣言
-		my %blast_hits = ();
-		my $num_hits = 0;
+		my %assembled_hits = ();
+		my %query_len = ();
+		my @blast_hits = ();
+		my $last_query = "";
+		my $last_subject = "";
+		my $num_assembly = 0;
+		
+		# パイプを開く
+		$report->reader;
 		
 		# 相同性検索の出力を読み込みながら処理
-		print STDERR "Running homology search...";
+		print STDERR $opt{"b"} ? "Loading homology search results..." : "Running homology search...";
 		while (<SEARCH_OUT>) {
 			# 改行コードを除去
 			chomp;
@@ -653,194 +720,179 @@ sub body {
 			# タブ文字でデータを分割
 			my @col = split(/\t/);
 			
-			# データを保存
-			my $dat = $col[8] < $col[9] ? {"query_start" => $col[6] - 1, "query_end" => $col[7], "locus_start" => $col[8] - 1, "locus_end" => $col[9], "strand" => 1}
-										: {"query_start" => $col[7], "query_end" => $col[6] - 1, "locus_start" => $col[9] - 1, "locus_end" => $col[8], "strand" => -1};
-			$dat->{"assemble"} = {};
-			$dat->{"score"} = $col[11];
-			$dat->{"num_connection"} = 0;
-			push(@{$blast_hits{$col[1]}{$col[0]}}, $dat);
+			# クエリー名またはサブジェクト名が変わった場合
+			if ($col[0] ne $last_query or $col[1] ne $last_subject ) {
+				# ヒットをアセンブル
+				if ($last_query and $last_subject) {
+					$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"});
+					$num_assembly += scalar(map {keys{%{$_->{"assemble"}}}} @{$assembled_hits{$last_query}{$last_subject}});
+				}
+				
+				# クエリー名が変わった場合
+				if ($col[0] ne $last_query) {
+					# クエリー名を更新
+					$last_query = $col[0];
+					
+					# 親プロセスからクエリー配列長を受信して登録
+					$query_len{$col[0]} = <$report>;
+					
+					# 改行コードを除去
+					chomp($query_len{$col[0]});
+				}
+				
+				# サブジェクト名を更新
+				$last_subject = $col[1];
+				
+				# リストをリセット
+				@blast_hits = ();
+			}
 			
-			# ヒット数を加算
-			$num_hits++;
+			# データをリストに登録
+			push(@blast_hits, $col[8] < $col[9] ? {"query_start" => $col[6] - 1, "query_end" => $col[7], "locus_start" => $col[8] - 1, "locus_end" => $col[9], "strand" => 1} : {"query_start" => $col[7], "query_end" => $col[6] - 1, "locus_start" => $col[9] - 1, "locus_end" => $col[8], "strand" => -1});
+			$blast_hits[-1]->{"assemble"} = {};
+			$blast_hits[-1]->{"score"} = $col[11];
+			$blast_hits[-1]->{"num_connection"} = 0;
 		}
 		print STDERR "completed\n";
 		
 		# 相同性検索の出力を閉じる
 		close(SEARCH_OUT);
 		
-		# パイプを開く
-		$query_report->reader;
-		
-		# 孫プロセスからクエリー配列長データを受信
-		print STDERR "Scanning queries...";
-		while (<$query_report>) {
-			# 改行コードを除去
-			chomp;
-			
-			# タブ文字でデータを分割
-			my @col = split(/\t/);
-			
-			# クエリー配列長をハッシュに登録
-			$query_len{$col[0]} = $col[1];
+		# 残りのヒットをアセンブル
+		if ($last_query and $last_subject) {
+			$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"});
+			$num_assembly += scalar(map {keys{%{$_->{"assemble"}}}} @{$assembled_hits{$last_query}{$last_subject}});
 		}
-		print STDERR "completed\n";
 		
-		# 孫プロセスを刈り取る
-		waitpid($pid, 0);
-		if ($?) {&exception::error("process abnormally exited");}
-		
-		# 変数を宣言
-		my $fin_hits = 0;
+		# 相同性検索でヒットが得られなかった場合
+		else {&exception::caution("no hits found from $opt{h} search");}
 		
 		# パイプを開く
-		if ($opt{"g"}) {$order->reader;}
-		for (my $pnum = 0;$pnum < @pipe;$pnum++) {$pipe[$pnum]->writer;}
 		$output->writer;
 		
-		# 相同性検索の各ヒット領域を整理し、領域データを送信
-		print STDERR "Running gene prediction...0%";
-		foreach my $subject (sort {$genome_faidx->{$a}->{"id_order"} <=> $genome_faidx->{$b}->{"id_order"}} keys(%blast_hits)) {
-			# 変数を宣言
-			my $num_loci = 0;
+		# 子プロセスBにアセンブルID数を送信
+		syswrite($output, "$num_assembly\n");
+		
+		# アクティブな子プロセスAにbed6形式+マスクブロック情報でデータを送信 (-g指定時)
+		if ($opt{"g"}) {
+			# パイプを開く
+			$order->reader;
+			foreach (@pipe) {$_->writer;}
 			
-			foreach my $query (keys(%{$blast_hits{$subject}})) {
-				# 変数を宣言
-				my $assemble_id = 0;
-				
-				# ヒットを領域開始点と領域終了点の順で並べ替え
-				my @sorted_hits = sort {$a->{"locus_start"} <=> $b->{"locus_start"} or $a->{"locus_end"} <=> $b->{"locus_end"}} @{$blast_hits{$subject}{$query}};
-				
-				# 後方のヒットから判定
-				for (my $i = -1;$i >= -@sorted_hits;$i--) {
-					# 連結するヒットを決定
-					for (my $k = $i + 1;$k < 0;$k++) {
-						# 指定値を超える距離のヒットに到達した時点で終了
-						if ($sorted_hits[$k]->{"locus_start"} - $sorted_hits[$i]->{"locus_end"} > $opt{"i"}) {last;}
-						
-						# 方向が異なるヒットを除外
-						if (!($sorted_hits[$k]->{"strand"} + $sorted_hits[$i]->{"strand"})) {next;}
-						
-						# 指定値を超えるクエリーオーバーラップのヒットを除外
-						if (abs($sorted_hits[$k]->{"query_start"} - $sorted_hits[$i]->{"query_end"}) > $opt{"o"}) {next;}
-						
-						# クエリー開始点が前進しないヒットを除外
-						if ($sorted_hits[$k]->{"query_start"} * $sorted_hits[$k]->{"strand"} <= $sorted_hits[$i]->{"query_start"} * $sorted_hits[$i]->{"strand"}) {next;}
-						
-						# クエリー終了点が前進しないヒットを除外
-						if ($sorted_hits[$k]->{"query_end"} * $sorted_hits[$k]->{"strand"} <= $sorted_hits[$i]->{"query_end"} * $sorted_hits[$i]->{"strand"}) {next;}
-						
-						# マスクするブロックを決定
-						my @mask_block = grep {$_->{"strand"} + $sorted_hits[$i]->{"strand"}} @sorted_hits[$i + 1..$k - 1];
-						my @mask_block_size = map {$_->{"locus_end"} - $_->{"locus_start"}} @mask_block;
-						my @mask_block_start = map {$_->{"locus_start"}} @mask_block;
-						
-						# 各アセンブルIDについて処理
-						foreach (keys(%{$sorted_hits[$k]->{"assemble"}})) {
-							# 変数を宣言
-							my $root = $sorted_hits[$k]->{"assemble"}->{$_};
-							
-							# 総スコアが更新されない同一IDのアセンブルを除外
-							if (exists($sorted_hits[$i]->{"assemble"}->{$_}) and $sorted_hits[$i]->{"assemble"}->{$_}->{"total_score"} >= $sorted_hits[$i]->{"score"} + $root->{"total_score"}) {next;}
-							
-							# データを更新
-							$sorted_hits[$i]->{"assemble"}->{$_} = {
-								"total_score" => $sorted_hits[$i]->{"score"} + $root->{"total_score"},
-								"locus_destination" => $root->{"locus_destination"},
-								"block_size" => [$sorted_hits[$i]->{"locus_end"} - $sorted_hits[$i]->{"locus_start"}, @{$root->{"block_size"}}],
-								"block_start" => [$sorted_hits[$i]->{"locus_start"}, @{$root->{"block_start"}}],
-								"mask_block_size" => [@mask_block_size, @{$root->{"mask_block_size"}}],
-								"mask_block_start" => [@mask_block_start, @{$root->{"mask_block_start"}}]
-							};
-						}
-						$sorted_hits[$k]->{"num_connection"}++;
-					}
-					
-					# 末尾ブロックの場合
-					if (!%{$sorted_hits[$i]->{"assemble"}}) {
-						# データを登録
-						$sorted_hits[$i]->{"assemble"}->{$assemble_id} = {
-							"total_score" => $sorted_hits[$i]->{"score"},
-							"locus_destination" => $sorted_hits[$i]->{"locus_end"},
-							"block_size" => [$sorted_hits[$i]->{"locus_end"} - $sorted_hits[$i]->{"locus_start"}],
-							"block_start" => [$sorted_hits[$i]->{"locus_start"}],
-							"mask_block_size" => [],
-							"mask_block_start" => []
-						};
-						
-						# アセンブルIDを更新
-						$assemble_id++;
-					}
-				}
-				
-				# 孫プロセスにデータを送信 (-g指定時)
-				if ($opt{"g"}) {
-					foreach my $locus (grep {!$_->{"num_connection"}} @sorted_hits) {
-						foreach my $assemble_id (keys(%{$locus->{"assemble"}})) {
-							# 変数を宣言
-							my $assemble = $locus->{"assemble"}->{$assemble_id};
-							
-							# プロセス番号を受信した孫プロセスにbed6形式+マスクブロック情報でデータを送信
-							syswrite($pipe[<$order>], join("\t", ($subject, $locus->{"locus_start"}, $assemble->{"locus_destination"}, $query, $opt{"h"} eq "tblastn" ? $query_len{$query} * 3 : $query_len{$query}, $locus->{"strand"} > 0 ? "+" : "-"), scalar(@{$assemble->{"mask_block_size"}}), join(",", @{$assemble->{"mask_block_size"}}), join(",", @{$assemble->{"mask_block_start"}})) . "\n");
-							
-							# 領域数を加算
-							$num_loci++;
+			# アセンブルデータを順に送信
+			foreach my $query (keys(%assembled_hits)) {
+				foreach my $subject (keys(%{$assembled_hits{$query}})) {
+					foreach my $locus (@{$assembled_hits{$query}{$subject}}) {
+						foreach my $assemble (values(%{$locus->{"assemble"}})) {
+							syswrite($pipe[<$order>], join("\t", ($subject, $locus->{"locus_start"}, $assemble->{"locus_destination"}, $query, $opt{"h"} =~ /^tblastn/ ? $query_len{$query} * 3 : $query_len{$query}, $locus->{"strand"}, scalar(@{$assemble->{"mask_block_size"}}), join(",", @{$assemble->{"mask_block_size"}}), join(",", @{$assemble->{"mask_block_start"}}))) . "\n");
 						}
 					}
 				}
-				
-				# 親プロセスにデータを送信 (-g未指定時)
-				else {
-					foreach my $locus (grep {!$_->{"num_connection"}} @sorted_hits) {
-						foreach my $assemble_id (keys(%{$locus->{"assemble"}})) {
-							# 変数を宣言
-							my $assemble = $locus->{"assemble"}->{$assemble_id};
-							
-							# 親プロセスにbed12形式でデータを送信
-							syswrite($output, join("\t", ($subject, $locus->{"locus_start"}, $assemble->{"locus_destination"}, $query, $assemble->{"total_score"}, $locus->{"strand"} > 0 ? "+" : "-", $locus->{"locus_start"}, $assemble->{"locus_destination"}, ".", scalar(@{$assemble->{"block_size"}}), join(",", @{$assemble->{"block_size"}}), join(",", map {$_ - $locus->{"locus_start"}} @{$assemble->{"block_start"}}))) . "\n$subject\n");
-							
-							# 領域数を加算
-							$num_loci++;
-						}
-					}
-				}
-				
-				# 送信済みヒット数を加算
-				$fin_hits += @sorted_hits;
-				
-				# 途中経過を表示
-				print STDERR "\rRunning gene prediction...",int($fin_hits / $num_hits * 100),"%";
-				
-				# 処理が完了したデータを削除
-				delete($blast_hits{$subject}{$query});
 			}
 			
-			# 親プロセスに染色体、連鎖群、スキャフォールドまたはコンティグ名と領域数を送信
-			syswrite($output, "$subject\t$num_loci\n");
+			# 全ての子プロセスAにデータ転送完了を送信
+			foreach (@pipe) {syswrite($_, "//\n");}
+		}
+		
+		# 子プロセスBにbed12形式でデータを送信 (-g未指定時)
+		else {
+			# アセンブルデータを順に送信
+			foreach my $query (keys(%assembled_hits)) {
+				foreach my $subject (keys(%{$assembled_hits{$query}})) {
+					foreach my $locus (@{$assembled_hits{$query}{$subject}}) {
+						foreach my $assemble (values(%{$locus->{"assemble"}})) {
+							syswrite($output, join("\t", ($subject, $locus->{"locus_start"}, $assemble->{"locus_destination"}, $query, $assemble->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assemble->{"locus_destination"}, ".", scalar(@{$assemble->{"block_size"}}), join(",", @{$assemble->{"block_size"}}), join(",", map {$_ - $locus->{"locus_start"}} @{$assemble->{"block_start"}}))) . "\n");
+						}
+					}
+				}
+			}
 			
-			# 処理が完了したデータを削除
-			delete($blast_hits{$subject});
+			# 子プロセスBにデータ転送完了を送信
+			syswrite($output, "//\n");
 		}
 		
-		# パイプを閉じる
-		undef(@pipe);
+		# パイプを開く
+		$signal->reader;
 		
-		# 孫プロセスを刈り取る
-		foreach (@pid) {
-			waitpid($_, 0);
-			if ($?) {&exception::error("process abnormally exited");}
-		}
-		print STDERR "\rRunning gene prediction...completed\n";
+		# 子プロセスBからシグナルを受信
+		<$signal>;
 		
 		# プロセスを終了
 		exit 0;
 	}
-	## ここまで子プロセスの処理 ##
+	## ここまで子プロセスCの処理 ##
+	
+	# 相同性検索の出力を閉じる
+	close(SEARCH_OUT);
 	
 	# 変数を宣言
-	my %loci = ();
-	my %num_loci = ();
-	my $locus_num = 0;
+	my $query_title = "";
+	my $query_seq = "";
+	
+	# パイプを開く
+	$report->writer;
+	
+	# クエリー配列を読み込みながら処理
+	while (my $line = <>) {
+		# 改行コードを除去
+		$line =~ s/\n|\r//g;
+		
+		# 配列行の処理
+		$query_seq .= $line =~ /^>/ ? "" : uc($line);
+		
+		# ID行の処理
+		if ($line =~ /^>/ or eof) {
+			# 配列データを処理
+			if ($query_title) {
+				# 子プロセスCにクエリー配列長を送信
+				syswrite($report, length($query_seq) . "\n");
+				
+				# クエリー配列をファイルに出力 (-g指定時)
+				if ($opt{"g"}) {
+					# 変数を宣言
+					my $output_seq = $opt{"h"} =~ /^tblastn/ ? $query_seq : &common::translate($query_seq, 0);
+					
+					# 配列からアスタリスクを除去
+					$output_seq =~ s/\*//g;
+					
+					# 出力ファイルを作成
+					open(QUERY, ">", "queries/$query_title.fa") or &exception::error("failed to make file: queries/$query_title.fa");
+					
+					# クエリー配列をfasta形式でファイルに出力
+					print QUERY ">$query_title\n";
+					for (my $pos = 0;$pos < length($output_seq);$pos += 60) {print QUERY substr($output_seq, $pos, 60), "\n";}
+					
+					# 出力ファイルを閉じる
+					close(QUERY);
+				}
+				
+				# クエリー配列を相同性検索に入力 (-b未指定時)
+				if (!$opt{"b"}) {
+					print SEARCH_IN ">$query_title\n";
+					for (my $pos = 0;$pos < length($query_seq);$pos += 60) {print SEARCH_IN substr($query_seq, $pos, 60), "\n";}
+				}
+			}
+			
+			# ID行の最初の空白文字の前までを配列名として登録
+			($query_title) = split(/\s/, substr($line, 1));
+			
+			# 配列をリセット
+			$query_seq = "";
+		}
+	}
+	
+	# 相同性検索への入力を閉じる (-b未指定時)
+	if (!$opt{"b"}) {close(SEARCH_IN);}
+	
+	# 子プロセスCを刈り取る
+	waitpid($pid, 0);
+	if ($?) {&exception::error("process abnormally exited");}
+	
+	# 変数を宣言
+	my @loci = ();
+	my @fin_loci = ();
+	my $fin_chr = 0;
+	my $gene_num = 0;
 	
 	# パイプを開く
 	$output->reader;
@@ -853,34 +905,114 @@ sub body {
 		# タブ文字でデータを分割
 		my @col = split(/\t/);
 		
-		# bed形式のデータを受信した場合
-		if (@col > 2) {push(@{$loci{$col[0]}}, \@col);next;}
-		
-		# 染色体、連鎖群、スキャフォールドまたはコンティグ名と領域数を受信した場合
-		if (@col > 1) {$num_loci{$col[0]}->[0] = $col[1];}
-		
-		# 染色体、連鎖群、スキャフォールドまたはコンティグ名のみ受信した場合
-		else {$num_loci{$col[0]}->[1]++;}
-		
-		# 各染色体、連鎖群、スキャフォールドまたはコンティグについて順に処理
-		foreach my $subject (sort {$genome_faidx->{$a}->{"id_order"} <=> $genome_faidx->{$b}->{"id_order"}} keys(%num_loci)) {
-			# 領域数が一致しない場合は以降の処理も含めて保留
-			if (!$num_loci{$subject}->[0] or !$num_loci{$subject}->[1] or $num_loci{$subject}->[0] > $num_loci{$subject}->[1]) {last;}
+		# bed12形式のデータを受信した場合
+		if (@col > 12) {
+			# ブロック情報をリストに変換
+			$col[11] = [split(/,/, $col[11])];
+			$col[12] = [split(/,/, $col[12])];
 			
-			# データを出力
-			if (exists($loci{$subject})) {&common::modify_bed($loci{$subject}, $locus_num, $opt{"n"}, $opt{"t"}, $opt{"v"}, $opt{"f"});}
+			# アイソフォームとしてデータを追加
+			push(@{$loci[$col[0] - $fin_chr]->[-1]}, [@col[1..12]]);
+		}
+		
+		# bed4形式のデータを受信した場合
+		elsif (@col > 4) {
+			# 遺伝子としてデータを追加
+			push(@{$loci[$col[0] - $fin_chr]}, [[@col[1..4]]]);
+		}
+		
+		# 通し番号を受信した場合
+		else {
+			# 受信した通し番号の領域のデータ受信が完了したことを登録
+			$fin_loci[$col[0] - $fin_chr] = 1;
 			
-			# 処理が完了したデータを削除
-			delete($loci{$subject});
-			delete($num_loci{$subject});
+			# 通し番号順に領域のデータ受信が完了していればデータを出力
+			while ($fin_loci[0]) {
+				&common::output($loci[0], $gene_num, $opt{"n"}, $opt{"f"});
+				shift(@loci);
+				shift(@fin_loci);
+				$fin_chr++;
+			}
 		}
 	}
 	
-	# 子プロセスを刈り取る
-	waitpid($pid, 0);
-	if ($?) {&exception::error("process abnormally exited");}
-	
+	# 子プロセスA、Bを刈り取る
+	foreach (@pid) {
+		waitpid($_, 0);
+		if ($?) {&exception::error("process abnormally exited");}
+	}
 	return(1);
+}
+
+# 相同性検索ヒットのアセンブル search::assemble(相同性検索ヒットリストリファレンス, 最大ヒット間距離, 最大許容クエリー境界オーバーラップ/ギャップ)
+sub assemble {
+	# 変数を宣言
+	my $assemble_id = 0;
+	
+	# ヒットを領域開始点と領域終了点の順で並べ替え
+	my @sorted_hits = sort {$a->{"locus_start"} <=> $b->{"locus_start"} or $a->{"locus_end"} <=> $b->{"locus_end"}} @{$_[0]};
+	
+	# 後方のヒットから判定
+	for (my $i = -1;$i >= -@sorted_hits;$i--) {
+		# 連結するヒットを決定
+		for (my $k = $i + 1;$k < 0;$k++) {
+			# 指定値を超える距離のヒットに到達した時点で終了
+			if ($sorted_hits[$k]->{"locus_start"} - $sorted_hits[$i]->{"locus_end"} > $_[1]) {last;}
+			
+			# 方向が異なるヒットを除外
+			if (!($sorted_hits[$k]->{"strand"} + $sorted_hits[$i]->{"strand"})) {next;}
+			
+			# 指定値を超えるクエリーオーバーラップのヒットを除外
+			if (abs($sorted_hits[$k]->{"query_start"} - $sorted_hits[$i]->{"query_end"}) > $_[2]) {next;}
+			
+			# クエリー開始点が前進しないヒットを除外
+			if ($sorted_hits[$k]->{"query_start"} * $sorted_hits[$k]->{"strand"} <= $sorted_hits[$i]->{"query_start"} * $sorted_hits[$i]->{"strand"}) {next;}
+			
+			# クエリー終了点が前進しないヒットを除外
+			if ($sorted_hits[$k]->{"query_end"} * $sorted_hits[$k]->{"strand"} <= $sorted_hits[$i]->{"query_end"} * $sorted_hits[$i]->{"strand"}) {next;}
+			
+			# マスクするヒットを決定
+			my @mask_block = grep {$_->{"strand"} + $sorted_hits[$i]->{"strand"}} @sorted_hits[$i + 1..$k - 1];
+			my @mask_block_size = map {$_->{"locus_end"} - $_->{"locus_start"}} @mask_block;
+			my @mask_block_start = map {$_->{"locus_start"}} @mask_block;
+			
+			# 各アセンブルIDについて処理
+			foreach (keys(%{$sorted_hits[$k]->{"assemble"}})) {
+				# 総スコアが更新されない同一IDのアセンブルを除外
+				if (exists($sorted_hits[$i]->{"assemble"}->{$_}) and $sorted_hits[$i]->{"assemble"}->{$_}->{"total_score"} >= $sorted_hits[$i]->{"score"} + $sorted_hits[$k]->{"assemble"}->{$_}->{"total_score"}) {next;}
+				
+				# データを更新
+				$sorted_hits[$i]->{"assemble"}->{$_} = {
+					"total_score" => $sorted_hits[$i]->{"score"} + $sorted_hits[$k]->{"assemble"}->{$_}->{"total_score"},
+					"locus_destination" => $sorted_hits[$k]->{"assemble"}->{$_}->{"locus_destination"},
+					"block_size" => [$sorted_hits[$i]->{"locus_end"} - $sorted_hits[$i]->{"locus_start"}, @{$sorted_hits[$k]->{"assemble"}->{$_}->{"block_size"}}],
+					"block_start" => [$sorted_hits[$i]->{"locus_start"}, @{$sorted_hits[$k]->{"assemble"}->{$_}->{"block_start"}}],
+					"mask_block_size" => [@mask_block_size, @{$sorted_hits[$k]->{"assemble"}->{$_}->{"mask_block_size"}}],
+					"mask_block_start" => [@mask_block_start, @{$sorted_hits[$k]->{"assemble"}->{$_}->{"mask_block_start"}}]
+				};
+			}
+			$sorted_hits[$k]->{"num_connection"}++;
+		}
+		
+		# 末尾ヒットの場合
+		if (!%{$sorted_hits[$i]->{"assemble"}}) {
+			# データを登録
+			$sorted_hits[$i]->{"assemble"}->{$assemble_id} = {
+				"total_score" => $sorted_hits[$i]->{"score"},
+				"locus_destination" => $sorted_hits[$i]->{"locus_end"},
+				"block_size" => [$sorted_hits[$i]->{"locus_end"} - $sorted_hits[$i]->{"locus_start"}],
+				"block_start" => [$sorted_hits[$i]->{"locus_start"}],
+				"mask_block_size" => [],
+				"mask_block_start" => []
+			};
+			
+			# アセンブルIDを更新
+			$assemble_id++;
+		}
+	}
+	
+	# アセンブルデータリストのリファレンスを返す
+	return([grep {!$_->{"num_connection"}} @sorted_hits]);
 }
 
 ## ここからfilterコマンドのパッケージ ##
@@ -889,9 +1021,8 @@ package filter;
 # コマンドとオプションを定義
 sub define {
 	$note = "Filter already annotated protein-coding genes under specified conditions.";
-	$usage = "<STDIN | in1.bed> [in2.bed ...] [> out.bed | > out.gtf]";
+	$usage = "<genome.fa> <STDIN | in1.bed> [in2.bed ...] [> out.bed | > out.gtf]";
 	$option{"d PATH "} = "Path to gene or protein database file (fasta format)";
-	$option{"g PATH "} = "Path to target genome data file (fasta format)";
 	$option{"h STR "} = "Homology search engine <blastx|blastn|dc-megablast|megablast> [blastx]";
 	$option{"k STR "} = "Keywords for filtering (AND[&], OR[;], BUT[!])";
 	$option{"r INT "} = "Cutoff rank of hits <1->";
@@ -902,9 +1033,11 @@ sub define {
 sub body {
 	# 指定されたオプションを確認
 	if ($opt{"b"} and $opt{"d"}) {&exception::error("options incompatible: -b and -d");}
-	if (!$opt{"g"} and $opt{"d"}) {&exception::error("-g required under -d");}
 	if ($opt{"h"} ne "blastx" and $opt{"h"} ne "blastn" and $opt{"h"} ne "dc-megablast" and $opt{"h"} ne "megablast") {&exception::error("unknown engine specified: -h $opt{h}");}
 	if (defined($opt{"r"}) and ($opt{"r"} !~ /^\d+$/ or $opt{"r"} < 1)) {&exception::error("specify INT >= 1: -r $opt{r}");}
+	
+	# ゲノム配列のfastaファイル名を取得
+	my $genome_file = shift(@ARGV);
 	
 	# 入力ファイルを確認
 	if (!@ARGV and !-p STDIN) {&exception::error("input file not specified");}
@@ -914,23 +1047,11 @@ sub body {
 		if (!-s $_) {&exception::error("null file specified: $_");}
 	}
 	
-	# 処理を定義
-	my $search_engine = $opt{"h"} eq "blastx" ? "blastx" : "blastn -task $opt{h}";
-	my $homology_search = "$search_engine -num_threads $opt{p} -outfmt '6 std salltitles' -soft_masking true -strand plus";
-	$homology_search .= $opt{"d"} ? " -db $opt{d}" : "";
-	$homology_search .= `which tee` ? " | tee fate_filter_$opt{h}.out" : "";
-
-	# 変数を宣言
-	my $genome_faidx = "";
+	# ゲノム配列のfastaファイルを検索
+	&common::find_db($genome_file);
 	
-	# ゲノム配列のfastaファイルを確認 (-g指定時)
-	if ($opt{"g"}) {
-		# ゲノム配列のfastaファイルを検索
-		&common::find_db($opt{"g"});
-		
-		# ゲノム配列のfastaインデックスを取得
-		$genome_faidx = &common::read_fasta($opt{"g"});
-	}
+	# ゲノム配列のfastaインデックスを取得
+	my $genome_faidx = &common::read_fasta($genome_file);
 	
 	# 参照データファイルを確認 (-d指定時)
 	if ($opt{"d"}) {
@@ -938,73 +1059,50 @@ sub body {
 		&common::find_db($opt{"d"});
 		
 		# 参照配列のblastデータベースを確認
-		if ($opt{"h"} eq "blastx") {&common::check_blastdb($opt{"d"}, 1);} else {&common::check_blastdb($opt{"d"});}
+		if ($opt{"h"} =~ /^blastx/) {&common::check_blastdb($opt{"d"}, 1);} else {&common::check_blastdb($opt{"d"});}
 	}
 	
+	# 処理を定義
+	my $search_engine = $opt{"h"} =~ /^blastx/ ? "blastx" : "blastn -task $opt{h}";
+	my $homology_search = "$search_engine -num_threads $opt{p} -outfmt '6 std salltitles' -soft_masking true -strand plus";
+	$homology_search .= $opt{"d"} ? " -db $opt{d}" : "";
+	$homology_search .= `which tee` ? " | tee fate_filter_$opt{h}.out" : "";
+
+	# 変数を宣言
+	my @pid = ();
+	my @pipe = ();
+	
 	# プロセス間通信のパイプを作成
+	my $order = IO::Pipe->new;
 	my $output = IO::Pipe->new;
 	
-	# プロセス分岐
-	my $pid = fork;
-	
-	# プロセス分岐に失敗した場合
-	if (!defined($pid)) {&exception::error("failed to fork process");}
-	
-	## ここから子プロセスの処理 ##
-	if (!$pid) {
-		# パイプを開く
-		$output->writer;
-		
-		# 相同性検索を利用しない場合 (-b、-d未指定時)
-		if (!$opt{"b"} and !$opt{"d"}) {
-			# 入力データを読み込みながら処理
-			while (my $line = <>) {
-				# タブ文字でデータを分割
-				my @col = split(/\t/, $line);
-				
-				# 親プロセスに読み込んだデータを送信
-				syswrite($output, $line);
-				
-				# 親プロセスに領域名と真を送信
-				syswrite($output, "$col[3]\t1\n");
-			}
-			
-			# プロセスを終了
-			exit 0;
-		}
-		
-		# 変数を宣言
-		my $pflag = 0;
-		my @pid = ();
-		my @pipe = ();
-		
+	# 指定したプロセス数で並列処理
+	for (my $pnum = 0;$pnum < $opt{"p"};$pnum++) {
 		# プロセス間通信のパイプを作成
-		my $order = IO::Pipe->new;
+		push(@pipe, my $input = IO::Pipe->new);
 		
-		# 指定したプロセス数で並列処理
-		for (my $pnum = 0;$pnum < $opt{"p"};$pnum++) {
-			# プロセス間通信のパイプを作成
-			push(@pipe, my $input = IO::Pipe->new);
+		# プロセス分岐
+		$pid[$pnum] = fork;
+		
+		# プロセス分岐に失敗した場合
+		if (!defined($pid[$pnum])) {&exception::error("failed to fork process");}
+		
+		## ここから子プロセスAの処理 ##
+		if (!$pid[$pnum]) {
+			# 変数を宣言
+			my %blast_hits = ();
 			
-			# プロセス分岐
-			$pid[$pnum] = fork;
+			# パイプを開く
+			$order->writer;
+			$output->writer;
+			$input->reader;
 			
-			# プロセス分岐に失敗した場合
-			if (!defined($pid[$pnum])) {$pflag = 1;last;}
+			# 子プロセスCにプロセス番号を送信
+			syswrite($order, "$pnum\n");
 			
-			## ここから孫プロセスの処理 ##
-			if (!$pid[$pnum]) {
-				# 変数を宣言
-				my %blast_hits = ();
-				
-				# パイプを開く
-				$order->writer;
-				$input->reader;
-				
-				# 子プロセスにデータ要求を送信
-				syswrite($order, "$pnum\n");
-				
-				# 子プロセスからデータを受信し、フィルタリングを行う
+			# 相同性検索の結果を集計 (-bまたは-d指定時)
+			if ($opt{"b"} or $opt{"d"}) {
+				# 子プロセスCからデータを受信しながら処理
 				while (<$input>) {
 					# 改行コードを除去
 					chomp;
@@ -1012,47 +1110,53 @@ sub body {
 					# タブ文字でデータを分割
 					my @col = split(/\t/);
 					
-					# 結果を集計
+					# 1列のデータを受信した場合
 					if (@col == 1) {
-						# 変数を宣言
-						my %score = ();
+						# データ転送完了を受信した場合
+						if ($col[0] eq "//") {last;}
 						
-						# 各ヒットについて処理
-						foreach (keys(%blast_hits)) {
+						# データ区切りを受信した場合
+						else {
 							# 変数を宣言
-							my @query_array = ();
-							my @target_array = ();
-							my $total_score = 0;
-							my $total_length = 0;
+							my %score = ();
 							
-							# スコアを算出
-							foreach my $root (@{$blast_hits{$_}}) {
-								$total_score += $root->{"score"};
-								$total_length += $root->{"query_end"} - $root->{"query_start"} + $root->{"locus_end"} - $root->{"locus_start"};
-								@query_array[$root->{"query_start"}..$root->{"query_end"} - 1] = (1) x ($root->{"query_end"} - $root->{"query_start"});
-								@target_array[$root->{"locus_start"}..$root->{"locus_end"} - 1] = (1) x ($root->{"locus_end"} - $root->{"locus_start"});
+							# 各ヒットについて処理
+							foreach (keys(%blast_hits)) {
+								# 変数を宣言
+								my @query_array = ();
+								my @target_array = ();
+								my $total_score = 0;
+								my $total_length = 0;
+								
+								# スコアを算出
+								foreach (@{$blast_hits{$_}}) {
+									$total_score += $_->{"score"};
+									$total_length += $_->{"query_end"} - $_->{"query_start"} + $_->{"locus_end"} - $_->{"locus_start"};
+									@query_array[$_->{"query_start"}..$_->{"query_end"} - 1] = (1) x ($_->{"query_end"} - $_->{"query_start"});
+									@target_array[$_->{"locus_start"}..$_->{"locus_end"} - 1] = (1) x ($_->{"locus_end"} - $_->{"locus_start"});
+								}
+								$score{$_} = $total_score / $total_length * scalar(grep {$_} (@query_array, @target_array));
 							}
-							$score{$_} = $total_score / $total_length * scalar(grep {$_} (@query_array, @target_array));
+							
+							# ヒットをスコア順に並べ替え
+							my @subjects = sort {$score{$b} <=> $score{$a}} keys(%score);
+							
+							# 指定値より下位のヒットを削除
+							if ($opt{"r"}) {splice(@subjects, $opt{"r"});}
+							
+							# 条件を満たした場合は子プロセスBに領域名と真を送信
+							if (grep {&common::keyword_search($_, $opt{"k"})} @subjects) {syswrite($output, "$col[0]\t1\n");}
+							
+							# 条件を満たさなかった場合は子プロセスBに領域名と偽を送信
+							else {syswrite($output, "$col[0]\t0\n");}
+							
+							# ハッシュをリセット
+							%blast_hits = ();
+							
+							# 子プロセスCにプロセス番号を送信
+							syswrite($order, "$pnum\n");
+							next;
 						}
-						
-						# ヒットをスコア順に並べ替え
-						my @subjects = sort {$score{$b} <=> $score{$a}} keys(%score);
-						
-						# 指定値より下位のヒットを削除
-						if ($opt{"r"}) {splice(@subjects, $opt{"r"});}
-						
-						# 条件を満たした場合は親プロセスに領域名と真を送信
-						if (grep {&common::keyword_search($_, $opt{"k"})} @subjects) {syswrite($output, "$col[0]\t1\n");}
-						
-						# 条件を満たさなかった場合は親プロセスに領域名と偽を送信
-						else {syswrite($output, "$col[0]\t0\n");}
-						
-						# ハッシュを初期化
-						%blast_hits = ();
-						
-						# 子プロセスにデータ要求を送信
-						syswrite($order, "$pnum\n");
-						next;
 					}
 					
 					# ヒット名を編集
@@ -1062,190 +1166,362 @@ sub body {
 					push(@{$blast_hits{$col[1]}}, {"query_start" => $col[6] - 1, "query_end" => $col[7], "locus_start" => $col[8] - 1, "locus_end" => $col[9], "score" => $col[11]});
 				}
 				
-				# プロセスを終了
-				exit 0;
-			}
-			## ここまで孫プロセスの処理 ##
-		}
-		
-		# プロセス分岐に失敗していた場合
-		if ($pflag) {&exception::error("failed to fork process");}
-		
-		# 変数を宣言
-		my @bed = ();
-		
-		# 入力データを読み込みながら処理
-		while (my $line = <>) {
-			# 改行コードを除去
-			chomp($line);
-			
-			# タブ文字でデータを分割
-			my @col = split(/\t/, $line);
-			
-			# 読み込んだデータをリストに登録
-			push(@bed, \@col);
-		}
-		
-		# 相同性検索の出力ファイルを開く (-b指定時)
-		if ($opt{"b"}) {open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}");}
-		
-		# 相同性検索を実行 (-d指定時)
-		if ($opt{"d"}) {main::open2(*SEARCH_OUT, *SEARCH_IN, $homology_search) or &exception::error("failed to execute homology search");}
-		
-		# プロセス分岐
-		$pid[$opt{"p"}] = fork;
-		
-		# プロセス分岐に失敗した場合
-		if (!defined($pid[$opt{"p"}])) {&exception::error("failed to fork process");}
-		
-		## ここから孫プロセスの処理 ##
-		if (!$pid[$opt{"p"}]) {
-			# 相同性検索の出力を閉じる
-			close(SEARCH_OUT);
-			
-			# 相同性検索の結果を再利用する場合 (-b指定時)
-			if ($opt{"b"}) {
-				# 親プロセスにbed12形式で順にデータを送信
-				foreach (@bed) {syswrite($output, join("\t", @{$_}) . "\n");}
+				# 子プロセスBにデータ転送完了を送信
+				syswrite($output, "//\n");
 			}
 			
-			# 相同性検索を実行する場合 (-d指定時)
-			if ($opt{"d"}) {
-				# ゲノム配列のfastaファイルを開く
-				open(GENOME, "<", $opt{"g"}) or &exception::error("failed to open file: $opt{g}");
+			# 変数を宣言
+			my @loci = ();
+			
+			# 子プロセスBからbedデータを受信しながらアイソフォームを決定
+			while (<$input>) {
+				# 改行コードを除去
+				chomp;
 				
-				# データを順に処理
-				foreach (@bed) {
-					# 親プロセスにbed12形式でデータを送信
-					syswrite($output, join("\t", @{$_}) . "\n");
+				# タブ文字でデータを分割
+				my @col = split(/\t/);
+				
+				# 1列のデータを受信した場合
+				if (@col == 1) {
+					# データ転送完了を受信した場合
+					if ($col[0] eq "//") {last;}
 					
-					# 取り出す領域の位置情報を算出
-					my $root = $genome_faidx->{$_->[0]};
-					my $start_point = int($_->[1] / $root->{"row_width"}) * $root->{"row_bytes"} + $_->[1] % $root->{"row_width"};
-					my $end_point = int($_->[2] / $root->{"row_width"}) * $root->{"row_bytes"} + $_->[2] % $root->{"row_width"};
+					# 遺伝子を分離
+					my $genes = &common::define_isoforms(\@loci, $opt{"v"}, $opt{"t"});
 					
-					# 領域の塩基配列を取得
-					seek(GENOME, $root->{"seq_start"} + $start_point, 0);
-					read(GENOME, my $locus_seq, $end_point - $start_point);
-					
-					# 改行コードを除去
-					$locus_seq =~ s/\n|\r//g;
-					
-					# 変数を宣言
-					my $query_seq = $locus_seq;
-					
-					# ブロックの領域だけを連結
-					if ($_->[9] and $_->[10] and $_->[11]) {
-						my @block_length = split(/,/, $_->[10]);
-						my @block_pos = split(/,/, $_->[11]);
-						if ($_->[9] == @block_length and $_->[9] == @block_pos) {
-							$query_seq = "";
-							for (my $i = 0;$i < $_->[9];$i++) {$query_seq .= substr($locus_seq, $block_pos[$i], $block_length[$i]);}
-						}
+					# 親プロセスにデータを送信
+					foreach my $gene (@{$genes}) {
+						syswrite($output, "$col[0]\t" . join("\t", @{$gene->[0]}) . "\n");
+						foreach my $isoform (@{$gene->[1]}) {syswrite($output, "$col[0]\t" . join("\t", @{$isoform}[0..9]) . "\t" . join(",", @{$isoform->[10]}) . "\t" . join(",", @{$isoform->[11]}) . "\n");}
 					}
 					
-					# 相補鎖に変換
-					if ($_->[5] and $_->[5] eq "-") {&common::complementary($query_seq);}
+					# 親プロセスに通し番号を送信
+					syswrite($output, "$col[0]\n");
 					
-					# 配列を相同性検索に入力
-					print SEARCH_IN ">$_->[3]\n";
-					for (my $pos = 0;$pos < length($query_seq);$pos += 60) {print SEARCH_IN substr($query_seq, $pos, 60), "\n";}
+					# リストをリセット
+					@loci = ();
+					
+					# 子プロセスBにプロセス番号を送信
+					syswrite($order, "$pnum\n");
+					next;
 				}
 				
-				# ゲノム配列のfastaファイルを閉じる
-				close(GENOME);
+				# ブロック情報をリストに変換
+				$col[10] = [split(/,/, $col[10])];
+				$col[11] = [split(/,/, $col[11])];
 				
-				# 相同性検索への入力を閉じる
-				close(SEARCH_IN);
+				# データをリストに追加
+				push(@loci, \@col);
 			}
 			
 			# プロセスを終了
 			exit 0;
 		}
-		## ここまで孫プロセスの処理 ##
-		
-		# 相同性検索への入力を閉じる (-d指定時)
-		if ($opt{"d"}) {close(SEARCH_IN);}
-		
+		## ここまで子プロセスAの処理 ##
+	}
+	
+	# プロセス間通信のパイプを作成
+	my $signal = IO::Pipe->new;
+	
+	# プロセス分岐
+	$pid[$opt{"p"}] = fork;
+	
+	# プロセス分岐に失敗した場合
+	if (!defined($pid[$opt{"p"}])) {&exception::error("failed to fork process");}
+	
+	## ここから子プロセスBの処理 ##
+	if (!$pid[$opt{"p"}]) {
 		# 変数を宣言
-		my $active_pnum = 0;
-		my $last_query = "";
-		my $fin_loci = 0;
+		my %bed = ();
+		my %loci = ();
+		my $fin_procs = 0;
 		
 		# パイプを開く
-		$order->reader;
-		for (my $pnum = 0;$pnum < $opt{"p"};$pnum++) {$pipe[$pnum]->writer;}
+		$output->reader;
 		
-		# 相同性検索の出力を読み込みながら処理
-		print STDERR "Running homology search...0%";
-		while (<SEARCH_OUT>) {
+		# 子プロセスAとCからのデータを受信してハッシュに登録
+		while (<$output>) {
+			# 改行コードを除去
+			chomp;
+			
 			# タブ文字でデータを分割
 			my @col = split(/\t/);
 			
-			# クエリー名を編集
-			($col[0]) = split(/::/, $col[0]);
-			
-			# クエリーリードが変わった場合
-			if ($col[0] ne $last_query) {
-				# 孫プロセスにデータの区切りを送信
-				if ($last_query) {syswrite($pipe[$active_pnum], "$last_query\n");}
-				
-				# ヒットが得られなかったクエリーの有無を確認
-				while ($col[0] ne $bed[$fin_loci]->[3]) {
-					# 親プロセスに領域名と偽を送信
-					syswrite($output, "$bed[$fin_loci]->[3]\t0\n");
-					
-					# 検索完了済み領域数を加算
-					$fin_loci++;
-				}
-				
-				# 最後に処理したクエリー名を更新
-				$last_query = $col[0];
-				
-				# 検索完了済み領域数を加算
-				$fin_loci++;
-				
-				# 孫プロセスからアクティブなプロセス番号を受信
-				$active_pnum = <$order>;
+			# 1列のデータを受信した場合
+			if (@col == 1) {
+				$fin_procs++;
+				if (($opt{"b"} or $opt{"d"}) and $fin_procs < $opt{"p"}) {next;}
+				else {last;}
 			}
 			
-			# 孫プロセスにデータを送信
-			syswrite($pipe[$active_pnum], join("\t", @col));
+			# 2列のデータを受信した場合
+			if (@col == 2) {
+				# 真を受信した場合はデータを登録
+				if ($col[1]) {push(@{$loci{$bed{$col[0]}->[0]}}, $bed{$col[0]});}
+				
+				# データを削除
+				delete($bed{$col[0]});
+				next;
+			}
 			
-			# 途中経過を表示
-			print STDERR "\rRunning homology search...",int($fin_loci / @bed * 100),"%";
+			# bed形式のデータを一時保存
+			$bed{$col[3]} = \@col;
 		}
-		if ($last_query) {syswrite($pipe[$active_pnum], $last_query . "\n");}
-		print STDERR "\rRunning homology search...completed\n";
 		
-		# 相同性検索の出力を閉じる
-		close(SEARCH_OUT);
+		# パイプを開く
+		$signal->writer;
 		
-		# パイプを閉じる
-		undef(@pipe);
+		# 子プロセスCにシグナルを受信
+		syswrite($signal, "//\n");
 		
-		# 孫プロセスを刈り取る
-		foreach (@pid) {
-			waitpid($_, 0);
-			if ($?) {&exception::error("process abnormally exited");}
+		# 変数を宣言
+		my $active_pnum = 0;
+		my $fin_chr = 0;
+		my $num_chr = keys(%loci);
+		
+		# パイプを開く
+		$order->reader;
+		foreach (@pipe) {$_->writer;}
+		
+		# ゲノムデータのID順に処理
+		print STDERR "Running isoform definition...0%";
+		foreach my $subject (sort {$genome_faidx->{$a}->{"id_order"} <=> $genome_faidx->{$b}->{"id_order"}} keys(%loci)) {
+			# 子プロセスAからプロセス番号を受信
+			$active_pnum = <$order>;
+			
+			# アクティブな子プロセスAにbed12形式でデータを送信
+			foreach (@{$loci{$subject}}) {syswrite($pipe[$active_pnum], join("\t", @{$_}) . "\n");}
+			
+			# アクティブな子プロセスAに通し番号を送信
+			syswrite($pipe[$active_pnum], "$fin_chr\n");
+			
+			# 通し番号を加算
+			$fin_chr++;
+			
+			# 経過を表示
+			print STDERR "\rRunning isoform definition...", int($fin_chr / $num_chr * 100), "%";
 		}
+		print STDERR "\rRunning isoform definition...completed\n";
+		
+		# 全ての子プロセスAにデータ転送完了を送信
+		foreach (@pipe) {syswrite($_, "//\n");}
 		
 		# プロセスを終了
 		exit 0;
 	}
-	## ここまで子プロセスの処理 ##
+	## ここまで子プロセスBの処理 ##
+	
+	# 相同性検索の出力ファイルを開く (-b指定時)
+	if ($opt{"b"}) {open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}");}
+	
+	# 相同性検索を実行 (-d指定時)
+	if ($opt{"d"}) {main::open2(*SEARCH_OUT, *SEARCH_IN, $homology_search) or &exception::error("failed to execute homology search");}
+	
+	# プロセス間通信のパイプを作成
+	my $report = IO::Pipe->new;
+	
+	# プロセス分岐
+	my $pid = fork;
+	
+	# プロセス分岐に失敗した場合
+	if (!defined($pid)) {&exception::error("failed to fork process");}
+	
+	## ここから子プロセスCの処理 ##
+	if (!$pid) {
+		# 相同性検索への入力を閉じる (-d指定時)
+		if ($opt{"d"}) {close(SEARCH_IN);}
+		
+		# 変数を宣言
+		my @bed = ();
+		my $last_query = "";
+		my $active_pnum = 0;
+		
+		# パイプを開く
+		$report->reader;
+		$output->writer;
+		
+		# 相同性検索を利用する場合 (-bまたは-d指定時)
+		if ($opt{"b"} or $opt{"d"}) {
+			# パイプを開く
+			$order->reader;
+			foreach (@pipe) {$_->writer;}
+			
+			# 相同性検索の出力を読み込みながら処理
+			print STDERR $opt{"b"} ? "Loading homology search results..." : "Running homology search...";
+			while (<SEARCH_OUT>) {
+				# タブ文字でデータを分割
+				my @col = split(/\t/);
+				
+				# クエリー名を編集
+				($col[0]) = split(/::/, $col[0]);
+				
+				# クエリー名が変わった場合
+				if ($col[0] ne $last_query) {
+					# 子プロセスAにデータ区切りを送信
+					if ($last_query) {syswrite($pipe[$active_pnum], "$last_query\n");}
+					
+					# クエリー名が一致するまで親プロセスからbedデータを受信
+					do {@bed = split(/\t/, <$report>);} until ($bed[3] eq $col[0]);
+					
+					# 子プロセスBにbedデータを送信
+					syswrite($output, join("\t", @bed));
+					
+					# クエリー名を更新
+					$last_query = $col[0];
+					
+					# 子プロセスAからプロセス番号を受信
+					$active_pnum = <$order>;
+				}
+				
+				# アクティブな子プロセスAにデータを送信
+				syswrite($pipe[$active_pnum], join("\t", @col));
+			}
+			print STDERR "completed\n";
+			
+			# 相同性検索の出力を閉じる
+			close(SEARCH_OUT);
+			
+			# アクティブな子プロセスAに残りのデータとデータ区切りを送信
+			if ($last_query) {syswrite($pipe[$active_pnum], "$last_query\n");}
+			
+			# 全ての子プロセスAにデータ転送完了を送信
+			foreach (@pipe) {syswrite($_, "//\n");}
+		}
+		
+		# 相同性検索を利用しない場合 (-b、d未指定時)
+		else {
+			while (<$report>) {
+				# タブ文字でデータを分割
+				my @col = split(/\t/);
+				
+				# 子プロセスBにbedデータと真を送信
+				syswrite($output, "$_$col[3]\t1\n");
+			}
+			
+			# 子プロセスBにデータ転送完了を送信
+			syswrite($output, "//\n");
+		}
+		
+		# パイプを開く
+		$signal->reader;
+		
+		# 子プロセスBからシグナルを受信
+		<$signal>;
+		
+		# プロセスを終了
+		exit 0;
+	}
+	## ここまで子プロセスCの処理 ##
+	
+	# 相同性検索の出力を閉じる
+	close(SEARCH_OUT);
+	
+	# パイプを開く
+	$report->writer;
+	
+	# ゲノム配列のfastaファイルを開く
+	open(GENOME, "<", $genome_file) or &exception::error("failed to open file: $genome_file");
+	
+	# bedデータを読み込みながら処理
+	while (my $line = <>) {
+		# 改行コードを除去
+		$line =~ s/\n|\r//g;
+		
+		# タブ文字でデータを分割
+		my @col = split(/\t/, $line);
+		
+		# 3列未満のデータの場合
+		if (@col < 3) {&exception::error("bad format input");}
+		
+		# 4列目が未定義の場合
+		if (!defined($col[3])) {$col[3] = "$opt{n}$.";}
+		
+		# 5列目が未定義の場合
+		if (!defined($col[4])) {$col[4] = 1000;}
+		
+		# 6列目が未定義の場合
+		if (!defined($col[5])) {$col[5] = "+";}
+		
+		# 7列目が未定義の場合
+		if (!defined($col[6])) {$col[6] = $col[1];}
+		
+		# 8列目が未定義の場合
+		if (!defined($col[7])) {$col[7] = $col[2];}
+		
+		# 9列目が未定義の場合
+		if (!defined($col[8])) {$col[8] = ".";}
+		
+		# 10列目が未定義の場合
+		if (!defined($col[9])) {$col[9] = 1;}
+		
+		# 11列目が未定義の場合
+		if (!defined($col[10])) {$col[10] = $col[2] - $col[1];}
+		
+		# 12列目が未定義の場合
+		if (!defined($col[11])) {$col[11] = 0;}
+		
+		# 向きを数字に変換
+		if ($col[5]) {$col[5] = $col[5] . "1";}
+		
+		# 子プロセスBまたはCにbedデータを送信
+		syswrite($report, join("\t", @col) . "\n");
+		
+		# 相同性検索を実行しない場合 (-d未指定時)
+		if (!$opt{"d"}) {next;}
+		
+		# 取り出す領域の位置情報を算出
+		my $start_point = int($col[1] / $genome_faidx->{$col[0]}->{"row_width"}) * $genome_faidx->{$col[0]}->{"row_bytes"} + $col[1] % $genome_faidx->{$col[0]}->{"row_width"};
+		my $end_point = int($col[2] / $genome_faidx->{$col[0]}->{"row_width"}) * $genome_faidx->{$col[0]}->{"row_bytes"} + $col[2] % $genome_faidx->{$col[0]}->{"row_width"};
+		
+		# 領域の塩基配列を取得
+		seek(GENOME, $genome_faidx->{$col[0]}->{"seq_start"} + $start_point, 0);
+		read(GENOME, my $locus_seq, $end_point - $start_point);
+		
+		# 改行コードを除去
+		$locus_seq =~ s/\n|\r//g;
+		
+		# 変数を宣言
+		my $query_seq = $locus_seq;
+		
+		# ブロックの領域だけを連結
+		my @block_length = split(/,/, $col[10]);
+		my @block_pos = split(/,/, $col[11]);
+		if ($col[9] == @block_length and $col[9] == @block_pos) {
+			$query_seq = "";
+			for (my $i = 0;$i < $col[9];$i++) {$query_seq .= substr($locus_seq, $block_pos[$i], $block_length[$i]);}
+		}
+		
+		# 相補鎖に変換
+		if ($col[5] and $col[5] < 0) {&common::complementary($query_seq);}
+		
+		# 配列を相同性検索に入力
+		print SEARCH_IN ">$col[3]\n";
+		for (my $pos = 0;$pos < length($query_seq);$pos += 60) {print SEARCH_IN substr($query_seq, $pos, 60), "\n";}
+	}
+	
+	# ゲノム配列のfastaファイルを閉じる
+	close(GENOME);
+	
+	# 相同性検索への入力を閉じる (-d指定時)
+	if ($opt{"d"}) {close(SEARCH_IN);}
+	
+	# パイプを閉じる
+	$report = undef;
+	
+	# 子プロセスCを刈り取る
+	waitpid($pid, 0);
+	if ($?) {&exception::error("process abnormally exited");}
 	
 	# 変数を宣言
-	my %locus_filter = ();
-	my @bed = ();
-	my @buffer = ();
-	my $locus_num = 0;
-	my $last_locus = "";
+	my @loci = ();
+	my @fin_loci = ();
+	my $fin_chr = 0;
+	my $gene_num = 0;
 	
 	# パイプを開く
 	$output->reader;
 	
-	# 子プロセスからデータを受信しながら処理
+	# データを受信しながら処理
 	while (<$output>) {
 		# 改行コードを除去
 		chomp;
@@ -1253,47 +1529,42 @@ sub body {
 		# タブ文字でデータを分割
 		my @col = split(/\t/);
 		
-		# bed形式のデータを受信した場合
-		if (@col > 2) {push(@bed, \@col);}
-		
-		# 領域名と真偽データを受信した場合
-		else {$locus_filter{$col[0]} = $col[1];}
-		
-		# 読み込んだ順に処理
-		while (@bed) {
-			# 真偽データが受信されていない場合は処理を中断
-			if (!exists($locus_filter{$bed[0]->[3]})) {last;}
+		# bed12形式のデータを受信した場合
+		if (@col > 12) {
+			# ブロック情報をリストに変換
+			$col[11] = [split(/,/, $col[11])];
+			$col[12] = [split(/,/, $col[12])];
 			
-			# 前回の領域と異なる場合
-			if ($bed[0]->[0] ne $last_locus) {
-				# 結果を出力
-				&common::modify_bed(\@buffer, $locus_num, $opt{"n"}, $opt{"t"}, $opt{"v"}, $opt{"f"});
-				
-				# リストを初期化
-				@buffer = ();
+			# アイソフォームとしてデータを追加
+			push(@{$loci[$col[0] - $fin_chr]->[-1]}, [@col[1..12]]);
+		}
+		
+		# bed4形式のデータを受信した場合
+		elsif (@col > 4) {
+			# 遺伝子としてデータを追加
+			push(@{$loci[$col[0] - $fin_chr]}, [[@col[1..4]]]);
+		}
+		
+		# 通し番号を受信した場合
+		else {
+			# 受信した通し番号の領域のデータ受信が完了したことを登録
+			$fin_loci[$col[0] - $fin_chr] = 1;
+			
+			# 通し番号順に領域のデータ受信が完了していればデータを出力
+			while ($fin_loci[0]) {
+				&common::output($loci[0], $gene_num, $opt{"n"}, $opt{"f"});
+				shift(@loci);
+				shift(@fin_loci);
+				$fin_chr++;
 			}
-			
-			# 真が受信されている場合は領域をリストに追加
-			if ($locus_filter{$bed[0]->[3]}) {push(@buffer, $bed[0]);}
-			
-			# 真偽データを削除
-			delete($locus_filter{$bed[0]->[3]});
-			
-			# 前回の領域を更新
-			$last_locus = $bed[0]->[0];
-			
-			# 先頭のbedデータを削除
-			shift(@bed);
 		}
 	}
 	
-	# 残りの結果を出力
-	&common::modify_bed(\@buffer, $locus_num, $opt{"n"}, $opt{"t"}, $opt{"v"}, $opt{"f"});
-	
-	# 子プロセスを刈り取る
-	waitpid($pid, 0);
-	if ($?) {&exception::error("process abnormally exited");}
-	
+	# 子プロセスA、Bを刈り取る
+	foreach (@pid) {
+		waitpid($_, 0);
+		if ($?) {&exception::error("process abnormally exited");}
+	}
 	return(1);
 }
 
@@ -1504,20 +1775,16 @@ sub read_fasta {
 	return(\%fasta_index);
 }
 
-# bedデータ整理 common::modify_bed(bedデータリストリファレンス, 領域番号, 領域名, 出力遺伝子タイプ, 出力バリアント数, 出力データ形式)
-sub modify_bed {
+# アイソフォームを決定 common::define_isoforms(bedデータリストリファレンス, 出力アイソフォーム数, 出力遺伝子型)
+sub define_isoforms {
 	# 変数を宣言
-	my %type = ("red" => substr($_[3], 0, 1), "yellow" => substr($_[3], 1, 1), "blue" => substr($_[3], 2, 1), "." => 1);
+	my %type = ("red" => substr($_[2], 0, 1), "yellow" => substr($_[2], 1, 1), "blue" => substr($_[2], 2, 1), "." => 1);
 	my @loci = ();
 	
 	# データを順に整理
 	foreach my $bed (@{$_[0]}) {
 		# 未指定の遺伝子タイプのデータを除外
 		if (!$type{$bed->[8]}) {next;}
-		
-		# ブロック情報をリストに変換
-		$bed->[10] = [split(/,/, $bed->[10])];
-		$bed->[11] = [split(/,/, $bed->[11])];
 		
 		# ブロック情報を絶対位置に変換して最後列に追加
 		my @blocks = ();
@@ -1529,13 +1796,13 @@ sub modify_bed {
 		# 既出領域と比較
 		for (my $i = 0;$i < @loci;$i++) {
 			# 方向が異なる場合を除外
-			if ($bed->[5] ne $loci[$i]->[0]->[3]) {next;}
+			if ($bed->[5] != $loci[$i]->[0]->[3]) {next;}
 			
 			# 領域がオーバーラップしない場合を除外
 			if ($bed->[2] <= $loci[$i]->[0]->[1] or $loci[$i]->[0]->[2] <= $bed->[1]) {next;}
 			
 			# ブロックがオーバーラップしない場合を除外
-			if (!List::Util::first {my $block = $_;List::Util::first {$_->[0] < $block->[1] and $block->[0] < $_->[1]} @{$loci[$i]->[0]->[4]}} @blocks) {next;}
+			if (!grep {my $block = $_;List::Util::first {$_->[0] < $block->[1] and $block->[0] < $_->[1]} @{$loci[$i]->[0]->[4]}} @blocks) {next;}
 			
 			# 既存アイソフォームから完全に一致するものを探索
 			my $synonym = List::Util::first {join(",", ($bed->[1], @{$bed->[10]}, @{$bed->[11]})) eq join(",", ($_->[1], @{$_->[10]}, @{$_->[11]}))} @{$loci[$i]->[1]};
@@ -1571,64 +1838,88 @@ sub modify_bed {
 		if (!$basal_locus) {push(@loci, [[$bed->[0], $bed->[1], $bed->[2], $bed->[5], \@blocks], [$bed]]);}
 	}
 	
-	# アイソフォーム部分を抽出
-	@loci = map {$_->[1]} @loci;
+	# 各領域について処理
+	foreach my $locus (@loci) {
+		# 出力アイソフォーム数が指定されている場合
+		if ($_[1]) {
+			# アイソフォームを並べ替える (スコア > 領域長 > 名前)
+			@{$locus->[1]} = sort {$b->[4] <=> $a->[4] or $b->[2] - $b->[1] <=> $a->[2] - $a->[1] or $a->[3] cmp $b->[3]} @{$locus->[1]};
+			
+			# 上位から指定した個数だけ選抜
+			splice(@{$locus->[1]}, $_[1]);
+			
+			# 領域の位置情報を更新
+			$locus->[0]->[1] = List::Util::min(map {$_->[1]} @{$locus->[1]});
+			$locus->[0]->[2] = List::Util::max(map {$_->[2]} @{$locus->[1]});
+		}
+		
+		# アイソフォームを並べ替える (開始点 > 終了点 > 名前 > スコア)
+		@{$locus->[1]} = sort {$a->[1] <=> $b->[1] or $a->[2] <=> $b->[2] or $a->[3] cmp $b->[3] or $b->[4] <=> $a->[4]} @{$locus->[1]};
+		
+		# 領域の全ブロック情報を削除
+		pop(@{$locus->[0]});
+	}
 	
-	# 各領域のアイソフォームを並べ替え (スコア順 > 領域長順 > 名前順)
-	@loci = map {[(sort {$b->[4] <=> $a->[4] or $b->[2] - $b->[1] <=> $a->[2] - $a->[1] or $a->[3] cmp $b->[3]} @{$_})]} @loci;
-	
-	# 各領域のアイソフォームを指定した個数だけ選抜
-	foreach (@loci) {if ($_[4]) {splice(@{$_}, $_[4]);}}
-	
-	# 各領域のアイソフォームを位置で並べ替え
-	@loci = map {[(sort {$a->[1] <=> $b->[1] or $a->[2] <=> $b->[2] or $a->[3] cmp $b->[3]} @{$_})]} @loci;
-	
-	# 各領域を位置で並べ替え
-	@loci = sort {$a->[0]->[1] <=> $b->[0]->[1] or $a->[0]->[2] <=> $b->[0]->[2] or $a->[0]->[5] cmp $b->[0]->[5]} @loci;
+	# 並べ替えた (開始点 > 終了点 > 向き) 領域リストのリファレンスを返す
+	return([sort {$a->[0]->[1] <=> $b->[0]->[1] or $a->[0]->[2] <=> $b->[0]->[2] or $a->[0]->[3] cmp $b->[0]->[3]} @loci]);
+}
+
+# データを出力 common::output(bedデータリストリファレンス, 遺伝子番号, プレフィックス, 出力形式)
+sub output {
+	# 変数を宣言
+	my %type = ("red" => "pseudogene", "yellow" => "truncated", "blue" => "protein_coding", "." => "uncharacterized");
 	
 	# データを出力
-	foreach my $locus (@loci) {
+	foreach my $locus (@{$_[0]}) {
 		# 領域番号を加算
 		$_[1]++;
 		
+		# 先頭の遺伝子行を抽出
+		my $gene = shift(@{$locus});
+		
+		# gtf形式の場合
+		if ($_[3] eq "gtf") {
+			# 開始点をgtf形式に修正
+			$gene->[1]++;
+			
+			# 遺伝子行を出力
+			print "$gene->[0]\tfate\tgene\t$gene->[1]\t$gene->[2]\t.\t", $gene->[3] > 0 ? "+" : "-", "\t.\t", 'gene_id "', "$_[2]$_[1]", '";', "\n";
+		}
+		
 		# アイソフォームを順に処理
 		for (my $i = 0;$i < @{$locus};$i++) {
-			# bed12形式で出力
-			if ($_[5] eq "bed") {
+			# bed形式の場合
+			if ($_[3] eq "bed") {
 				$locus->[$i]->[3] = "$_[2]$_[1]." . ($i + 1) . ":" . substr($locus->[$i]->[3], index($locus->[$i]->[3], ":") + 1);
+				$locus->[$i]->[5] = $locus->[$i]->[5] > 0 ? "+" : "-";
 				print join("\t", @{$locus->[$i]}[0..9]), "\t", join(",", @{$locus->[$i]->[10]}), "\t", join(",", @{$locus->[$i]->[11]}), "\n";
 			}
 			
-			# gtf形式で出力
-			elsif ($_[5] eq "gtf") {
+			# gtf形式の場合
+			elsif ($_[3] eq "gtf") {
 				# 開始点をgtf形式に修正
 				$locus->[$i]->[1]++;
 				
-				# 遺伝子タイプを修正
-				if ($locus->[$i]->[8] eq "red") {$locus->[$i]->[8] = "pseudogene";}
-				elsif ($locus->[$i]->[8] eq "yellow") {$locus->[$i]->[8] = "truncated";}
-				elsif ($locus->[$i]->[8] eq "blue") {$locus->[$i]->[8] = "protein_coding";}
-				elsif ($locus->[$i]->[8] eq ".") {$locus->[$i]->[8] = "uncharacterized";}
-				
 				# 領域を示す行を出力
-				print "$locus->[$i]->[0]\tfate\ttranscript\t$locus->[$i]->[1]\t$locus->[$i]->[2]\t$locus->[$i]->[4]\t$locus->[$i]->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].", $i + 1, '"; transcript_name "', $locus->[$i]->[3], '"; transcript_biotype "', $locus->[$i]->[8], '";', "\n";
+				print "$locus->[$i]->[0]\tfate\ttranscript\t$locus->[$i]->[1]\t$locus->[$i]->[2]\t$locus->[$i]->[4]\t$locus->[$i]->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].", $i + 1, '"; transcript_name "', $locus->[$i]->[3], '"; transcript_biotype "', $type{$locus->[$i]->[8]}, '";', "\n";
 				
 				# 逆鎖の場合は個々のブロックを逆順に並べ替え
-				if ($locus->[$i]->[5] eq "-") {$locus->[$i]->[10] = [reverse(@{$locus->[$i]->[10]})];$locus->[$i]->[11] = [reverse(@{$locus->[$i]->[11]})];}
+				if ($locus->[$i]->[5] < 0) {$locus->[$i]->[10] = [reverse(@{$locus->[$i]->[10]})];$locus->[$i]->[11] = [reverse(@{$locus->[$i]->[11]})];}
 				
-				# 変数を宣言
-				my $sign = $locus->[$i]->[5] . 1;
+				# 向きを登録
+				my $sign = $locus->[$i]->[5];
+				$locus->[$i]->[5] = $locus->[$i]->[5] > 0 ? "+" : "-";
 				
 				# 個々のヒットを示す行を出力
 				for (my $j = 0;$j < $locus->[$i]->[9];$j++) {
 					# エキソン行を出力
-					print "$locus->[$i]->[0]\tfate\texon\t", $locus->[$i]->[1] + $locus->[$i]->[11]->[$j], "\t", $locus->[$i]->[1] + $locus->[$i]->[10]->[$j] + $locus->[$i]->[11]->[$j] - 1, "\t.\t$locus->[$i]->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].", $i + 1, '"; exon_number "', $j + 1, '"; transcript_name "', $locus->[$i]->[3], '"; transcript_biotype "', $locus->[$i]->[8], '"; exon_id "', "$_[2]$_[1].", $i + 1, ".", $j + 1, '";', "\n";
+					print "$locus->[$i]->[0]\tfate\texon\t", $locus->[$i]->[1] + $locus->[$i]->[11]->[$j], "\t", $locus->[$i]->[1] + $locus->[$i]->[10]->[$j] + $locus->[$i]->[11]->[$j] - 1, "\t.\t$locus->[$i]->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].", $i + 1, '"; exon_number "', $j + 1, '"; transcript_name "', $locus->[$i]->[3], '"; transcript_biotype "', $type{$locus->[$i]->[8]}, '"; exon_id "', "$_[2]$_[1].", $i + 1, ".", $j + 1, '";', "\n";
 					
 					# コーディング領域以外を除外
-					if ($locus->[$i]->[8] ne "protein_coding") {next;}
+					if ($type{$locus->[$i]->[8]} ne "protein_coding") {next;}
 					
 					# コーディング領域行を出力
-					print "$locus->[$i]->[0]\tfate\tCDS\t", $locus->[$i]->[1] + $locus->[$i]->[11]->[$j] + 3 * 0 ** ($locus->[$i]->[9] - $j + $sign), "\t", $locus->[$i]->[1] + $locus->[$i]->[10]->[$j] + $locus->[$i]->[11]->[$j] - 1 - 3 * 0 ** ($locus->[$i]->[9] - $j - $sign), "\t.\t$locus->[$i]->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].", $i + 1, '"; exon_number "', $j + 1, '"; transcript_name "', $locus->[$i]->[3], '"; transcript_biotype "', $locus->[$i]->[8], '"; protein_id "', "$_[2]$_[1].", $i + 1, 'p";', "\n";
+					print "$locus->[$i]->[0]\tfate\tCDS\t", $locus->[$i]->[1] + $locus->[$i]->[11]->[$j] + 3 * 0 ** ($locus->[$i]->[9] - $j + $sign), "\t", $locus->[$i]->[1] + $locus->[$i]->[10]->[$j] + $locus->[$i]->[11]->[$j] - 1 - 3 * 0 ** ($locus->[$i]->[9] - $j - $sign), "\t.\t$locus->[$i]->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].", $i + 1, '"; exon_number "', $j + 1, '"; transcript_name "', $locus->[$i]->[3], '"; transcript_biotype "', $type{$locus->[$i]->[8]}, '"; protein_id "', "$_[2]$_[1].", $i + 1, 'p";', "\n";
 				}
 			}
 		}
