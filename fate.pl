@@ -10,7 +10,7 @@ use Getopt::Std;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.1.4.1";	# ソフトウェアのバージョン
+my $version = "ver.1.4.2";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding genes by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -727,7 +727,7 @@ sub body {
 				# ヒットをアセンブル
 				if ($last_query and $last_subject) {
 					$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"});
-					$num_assembly += scalar(map {keys{%{$_->{"assemble"}}}} @{$assembled_hits{$last_query}{$last_subject}});
+					$num_assembly += scalar(map {keys(%{$_->{"assemble"}})} @{$assembled_hits{$last_query}{$last_subject}});
 				}
 				
 				# クエリー名が変わった場合
@@ -763,7 +763,7 @@ sub body {
 		# 残りのヒットをアセンブル
 		if ($last_query and $last_subject) {
 			$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"});
-			$num_assembly += scalar(map {keys{%{$_->{"assemble"}}}} @{$assembled_hits{$last_query}{$last_subject}});
+			$num_assembly += scalar(map {keys(%{$_->{"assemble"}})} @{$assembled_hits{$last_query}{$last_subject}});
 		}
 		
 		# 相同性検索でヒットが得られなかった場合
@@ -1162,7 +1162,7 @@ sub body {
 					}
 					
 					# ヒット名を編集
-					if ($col[12] and $col[1] eq substr($col[12], 0, index($col[12], " "))) {$col[1] = $col[12];}
+					if ($col[12]) {$col[1] .= " $col[12]";}
 					
 					# ヒットをハッシュに登録
 					push(@{$blast_hits{$col[1]}}, {"query_start" => $col[6] - 1, "query_end" => $col[7], "locus_start" => $col[8] - 1, "locus_end" => $col[9], "score" => $col[11]});
