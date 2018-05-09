@@ -11,7 +11,7 @@ no warnings 'portable';
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.0.0";	# ソフトウェアのバージョン
+my $version = "ver.2.0.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -315,7 +315,7 @@ sub body {
 				# 配列データを処理
 				if (defined($query_title)) {
 					# 親プロセスにクエリー配列長を送信
-					print $report length($query_seq), "\n";
+					syswrite($report, length($query_seq) . "\n");
 					
 					# クエリー配列をファイルに出力 (-g指定時)
 					if ($opt{"g"}) {
@@ -974,7 +974,7 @@ sub body {
 			&common::check_bed(\@col, "$opt{n}$.");
 			
 			# 親プロセスにbedデータを送信 (-d未指定時)
-			print $report join("\t", @col), "\n";
+			syswrite($report, join("\t", @col) . "\n");
 			
 			# 相同性検索を実行しない場合
 			next if !$opt{"d"};
