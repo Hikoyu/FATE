@@ -1,16 +1,16 @@
 ========================================
-Abridged User's Manual of FATE ver.1.4.2
+Abridged User's Manual of FATE ver.2.0.0
 ========================================
 
-System Requirements
--------------------
-macOS or Linux
+Supported Operating System
+--------------------------
+macOS or Linux (64-bit)
 
 
 Software Requirements
 ---------------------
-perl		5.8 or later
-blast+		2.2.30 or later	ftp://ftp.ncbi.nlm.nih.gov/blast/executables/LATEST/
+perl		5.8 or later (64-bit)
+blast+		2.2.18 or later	ftp://ftp.ncbi.nlm.nih.gov/blast/executables/LATEST/
 exonerate	2.4.0		ftp://ftp.ebi.ac.uk/pub/software/vertebrategenomics/exonerate/
 wise2		2.4.1		http://www.ebi.ac.uk/~birney/wise2/
 
@@ -18,12 +18,13 @@ wise2		2.4.1		http://www.ebi.ac.uk/~birney/wise2/
 Installation
 ------------
 Move "fate.pl" to any directory in the PATH.
-Other required softwares (blast+ etc.) have to be also installed and be in the PATH.
+Other required softwares have to be also installed and be in the PATH.
 
-Wise2 is difficult to install.
+Installing wise2 is difficult.
 If you cannot install wise2 by yourself, try "wise2_installer.sh" as follows:
 $ mv wise2_installer.sh /any/where/wise2.4.1/
 $ cd /any/where/wise2.4.1/
+$ chmod 755 wise2_installer.sh
 $ ./wise2_installer.sh
 
 This installer requires clang, pkg-config, and glib2.
@@ -42,105 +43,147 @@ Quick Start
 -----------
 General usage is as below.
 
-$ fate.pl <command> [option] [input] [> output] [2> log]
+$ fate.pl <command> [option] [input] [>output] [2>log]
 
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.1.4.2
+fate.pl ver.2.0.0
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.
-  This software annotates protein-coding genes by a classical homology-based method.
+  This software annotates protein-coding regions by a classical homology-based method.
 
 Usage:
   fate.pl <command>
 
 Command:
-  filter	Filter already annotated protein-coding genes under specified conditions
-  search	Search protein-coding genes under specified conditions
+  filter	Filter already annotated protein-coding regions under specified conditions
+  predict	Predict protein-coding regions from cDNA sequences under specified conditions
+  search	Search protein-coding regions from genomic DNA sequences under specified conditions
+
 
 [search]
 fate.pl search
 
 Functions:
-  Search protein-coding genes under specified conditions.
+  Search protein-coding regions from genomic DNA sequences under specified conditions.
 
 Usage:
-  fate.pl search [options] <genome.fa> <STDIN | in1.fa> [in2.fa ...] [> out.bed | > out.gtf]
+  fate.pl search [options] <genome.fna> <STDIN|in1.fa> [in2.fa ...] [>out.bed|>out.gtf]
 
 Options:
   -3 INT 	Length of 3' flanking region <0-> [300]
   -5 INT 	Length of 5' flanking region <0-> [300]
-  -b PATH 	Path to blast output file (-outfmt 6) to reuse
-  -c NUM 	Minimum query coverage to regard as complete CDS <0-1> [0.85]
+  -b PATH 	Path to blast output file (TSV format)
+  -c FLOAT 	Minimum query coverage to regard as complete CDS <0-1> [0.85]
   -f STR 	Output format <bed|gtf> [bed]
   -g STR 	Gene prediction engine <exonerate|genewise>
-  -h STR 	Homology search engine <tblastn|tblastn-fast|blastn|dc-megablast|megablast> [blastn]
+  -h STR 	Homology search engine <blastn|dc-megablast|megablast|tblastn|tblastn-fast> [blastn]
   -i INT 	Maximum interval length allowed to assemble initial hits [100000]
   -l INT 	Minimum length to regard as complete CDS <0-> [0]
   -n STR 	Prefix of each locus name [locus]
   -o INT 	Maximum overlap/gap length of query boundries allowed to assemble initial hits [30]
-  -p INT 	Number of parallel processes <1-> [1]
+  -p INT 	Number of parallel worker threads <1-> [1]
   -s		Force GT-AG rule for splice junctions
   -t INT 	Output biotype (+1:functional genes, +2:truncated genes, +4:pseudogenes) <1-7> [7]
   -v INT 	Maximum number of candidate isoforms <1->
+  -w		Use 2-byte line feed code (CR+LF) for input files
 
 Examples:
-1. Search genome database using nucleotide queries via megablast, then output CDS loci. 
-$ fate.pl search -h megablast genome.fa in.fa > out.bed
+1. Search genome database using nucleotide queries via megablast, then output CDS regions. 
+$ fate.pl search -h megablast genome.fa in.fa >out.bed
 
-2. Search genome database using amino acid queries via tblastn and perform gene prediction via exonerate, then output CDS loci.
-$ fate.pl search -h tblastn -g exonerate genome.fa in.fa > out.bed
+2. Search genome database using amino acid queries via tblastn and perform gene prediction via exonerate, then output CDS regions.
+$ fate.pl search -h tblastn -g exonerate genome.fa in.fa >out.bed
 
-3. Reuse the output file of homology search and perform gene prediction via wise2, then output CDS loci in gtf format.
-$ fate.pl search -b fate_search.out -g genewise genome.fa in.fa > out.bed
+3. Reuse the output file of homology search and perform gene prediction via wise2, then output CDS regions in gtf format.
+$ fate.pl search -b fate_search.out -g genewise genome.fa in.fa >out.bed
 
-4. Search genome database using nucleotide queries via blastn and perform gene prediction via exonerate, then output CDS (functional genes only) loci.
-$ fate.pl search -h blastn -g exonerate -t 1 genome.fa in.fa > out.bed
+4. Search genome database using nucleotide queries via blastn and perform gene prediction via exonerate, then output CDS (functional genes only) regions.
+$ fate.pl search -h blastn -g exonerate -t 1 genome.fa in.fa >out.bed
 
 Note: The colors in the 9th column of bed format output by FATE indicate biotypes: functional genes by "blue", truncated genes by "yellow", and pseudogenes by "red", respectively.
 
-5. Search genome database using amino acid queries via tblastn and perform gene prediction via wise2, then output CDS loci including up to 3 candidate isoforms.
-$ fate.pl search -h tblastn -g genewise -v 3 genome.fa in.fa > out.bed
+5. Search genome database using amino acid queries via tblastn-fast and perform gene prediction via wise2, then output CDS regions including up to 3 candidate isoforms.
+$ fate.pl search -h tblastn-fast -g genewise -v 3 genome.fa in.fa >out.bed
+
+Note: Blast+-2.2.30 or later is required for tblastn-fast search.
+
 
 [filter]
 fate.pl filter
 
 Functions:
-  Filter already annotated protein-coding genes under specified conditions.
+  Filter already annotated protein-coding regions under specified conditions.
 
 Usage:
-  fate.pl filter [options] <genome.fa> <STDIN | in1.bed> [in2.bed ...] [> out.bed | > out.gtf]
+  fate.pl filter [options] <genome.fna> <STDIN|in1.bed> [in2.bed ...] [>out.bed|>out.gtf]
 
 Options:
-  -b PATH 	Path to blast output file (-outfmt 6) to reuse
-  -d PATH 	Path to gene or protein database file (fasta format)
+  -b PATH 	Path to blast output file (TSV format)
+  -d PATH 	Path to gene/protein database file (FASTA format)
   -f STR 	Output format <bed|gtf> [bed]
-  -h STR 	Homology search engine <blastx|blastx-fast|blastn|dc-megablast|megablast> [blastx]
+  -h STR 	Homology search engine <blastn|dc-megablast|megablast|blastx|blastx-fast> [blastn]
   -k STR 	Keywords for filtering (AND[&], OR[;], BUT[!])
   -n STR 	Prefix of each locus name [locus]
-  -p INT 	Number of parallel processes <1-> [1]
+  -p INT 	Number of parallel worker threads <1-> [1]
   -r INT 	Cutoff rank of hits <1->
   -t INT 	Output biotype (+1:functional genes, +2:truncated genes, +4:pseudogenes) <1-7> [7]
   -v INT 	Maximum number of candidate isoforms <1->
+  -w		Use 2-byte line feed code (CR+LF) for input files
 
 Examples:
 1. Search protein database using the sequences of defined loci in the input bed file via blastx, then output the loci which get the hits including 'keyword' in the top 5.
-$ fate.pl filter -d protein.fa -h blastx -k 'keyword' -r 5 genome.fa in.bed > out.bed
+$ fate.pl filter -d protein.fa -h blastx -k 'keyword' -r 5 genome.fa in.bed >out.bed
 
 Note: For example, keyword 'hoge&piyo;!foo&!bar' means including both 'hoge' and 'piyo' or including neither 'foo' nor 'bar'.
 
 2. Search nucleotide database using the sequences of defined loci in the input file via blastn, then output the loci which get the hits including 'keyword' in the top 5.
-$ fate.pl filter -d nucleotide.fa -h blastn -k 'keyword' -r 5 genome.fa in.bed > out.bed
+$ fate.pl filter -d nucleotide.fa -h blastn -k 'keyword' -r 5 genome.fa in.bed >out.bed
 
 3. Reuse the output file of homology search, then output the loci which get the hits including 'keyword' in the top 5.
-$ fate.pl filter -b fate_filter.out -k 'keyword' -r 5 genome.fa in.bed > out.bed
+$ fate.pl filter -b fate_filter.out -k 'keyword' -r 5 genome.fa in.bed >out.bed
 
 Note: FATE outputs the results of homology search in customized TSV format (-outfmt '6 std salltitles') as default.
 
 4. Output only functional gene loci in gtf format.
-$ fate.pl filter -f gtf -t 1 genome.fa in.bed > out.gtf
+$ fate.pl filter -f gtf -t 1 genome.fa in.bed >out.gtf
+
+
+[predict]
+fate.pl predict
+
+Functions:
+  Predict protein-coding regions from cDNA sequences under specified conditions.
+
+Usage:
+  fate.pl predict [options] <protein.faa> <STDIN|in1.fna> [in2.fna ...] [>out.bed|>out.gtf]
+
+Options:
+  -b PATH 	Path to blast output file (TSV format)
+  -c FLOAT 	Minimum query coverage to regard as complete CDS <0-1> [0.85]
+  -f STR 	Output format <bed|gtf> [bed]
+  -g STR 	Gene prediction engine <exonerate|genewise> [exonerate]
+  -h STR 	Homology search engine <blastx|blastx-fast> [blastx]
+  -k STR 	Keywords for filtering (AND[&], OR[;], BUT[!])
+  -l INT 	Minimum length to regard as complete CDS <0-> [0]
+  -n STR 	Prefix of each locus name [locus]
+  -p INT 	Number of parallel worker threads <1-> [1]
+  -r INT 	Cutoff rank of hits <1->
+  -s		Omit reverse strand search
+  -t INT 	Output biotype (+1:functional genes, +2:truncated genes, +4:pseudogenes) <1-7> [7]
+  -v INT 	Maximum number of candidate isoforms <1->
+  -w		Use 2-byte line feed code (CR+LF) for input files
+
+Examples:
+1. Search protein database using cDNA queries via blastx and perform CDS prediction via exonerate using the hits, then output CDS regions.
+$ fate.pl predict -h blastx -g exonerate protein.fa cdna.fa >out.bed
+
+2. Search protein database using cDNA queries via blastx-fast and perform CDS prediction via wise2 using top 3 hits including 'keyword', then output CDS regions.
+$ fate.pl predict -h blastx-fast -g genewise -k 'keyword' -r 3 protein.fa cdna.fa >out.bed
+
+Note: Blast+-2.2.30 or later is required for blastx-fast search.
 
 
 Tips
@@ -148,15 +191,20 @@ Tips
 1. FATE does not output DNA sequences. If you want, use 'getfasta' command in bedtools.
 bedtools	http://bedtools.readthedocs.io
 
-2. You can use the results of blast search executed independently of FATE. Specify '-b' followed by blast output file in the TSV format (-outfmt 6). When you execute 'filter' command, ghostx/ghostz output file is also available. 
+2. You can import the results of blast search executed independently of FATE. Specify '-b' followed by blast output file in the TSV format (-outfmt '6 std salltitles'). Compatible format file is also available. The point is that you can use blast-like third-party software. (e.g. ghostx, ghostz)
+$ bedtools getfasta -s -split -name -fi genome.fa -bed in.bed -fo cds.fa
+$ ghostz aln -d protein.fa -i cds.fa -o fate_filter.out -q d -t p
+$ fate.pl filter -b fate_filter.out -k 'keyword' genome.fa in.bed >out.bed
+
+Note: In order to obtain the query seqeunces, use 'getfasta' command in bedtools with '-name' option. (If you use bedtools-2.27.0 or later, specify '-name+' option instead.)
 ghostx	http://www.bi.cs.titech.ac.jp/ghostx
 ghostz	http://www.bi.cs.titech.ac.jp/ghostz
 
-3. FATE use environment variable 'BLASTDB' if defined. So, you can omit the PATH prefix of genome/protein sequence file. For example, instead of writing as follows:
-$ fate.pl filter -d /path/to/protdb/protein.fa -h blastx -k 'keyword' -r 5 /path/to/genomedb/genome.fa in.bed > out.bed
+3. If defined, FATE use environment variable 'BLASTDB'. So, you can omit the PATH prefix of genome/protein sequence file. For example, instead of writing as follows:
+$ fate.pl filter -d /path/to/protdb/protein.fa -h blastx -k 'keyword' -r 5 /path/to/genomedb/genome.fa in.bed >out.bed
 
 you can simply write as follows:
-$ fate.pl filter -d protein.fa -h blastx -k 'keyword' -r 5 genome.fa in.bed > out.bed
+$ fate.pl filter -d protein.fa -h blastx -k 'keyword' -r 5 genome.fa in.bed >out.bed
 
 if you defined 'BLASTDB' as follows:
 $ export BLASTDB="/path/to/protdb:/path/to/genomedb"
