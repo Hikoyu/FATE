@@ -11,7 +11,7 @@ no warnings 'portable';
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.0.1";	# ソフトウェアのバージョン
+my $version = "ver.2.0.2";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -314,8 +314,8 @@ sub body {
 			if ($line =~ /^>/ or eof) {
 				# 配列データを処理
 				if (defined($query_title)) {
-					# 親プロセスにクエリー配列長を送信
-					syswrite($report, length($query_seq) . "\n");
+					# 親プロセスにクエリー名とクエリー配列長をバイナリ形式で送信
+					syswrite($report, pack("S/A*L", $query_title, length($query_seq)));
 					
 					# クエリー配列をファイルに出力 (-g指定時)
 					if ($opt{"g"}) {
@@ -389,8 +389,20 @@ sub body {
 			# ここまでのヒットをアセンブル
 			$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assembly += scalar(map {keys(%{$_->{"assemble"}})} @{$assembled_hits{$last_query}{$last_subject}}) if defined($last_query);
 			
-			# クエリー名が変わった場合は子プロセスからクエリー配列長を受信し、クエリー名を更新
-			$query_len{$col[0]} .= <$report> and $last_query = $col[0] if !defined($last_query) or $col[0] ne $last_query;
+			# クエリー名が変わった場合
+			while (!defined($last_query) or $col[0] ne $last_query) {
+				# 子プロセスからクエリー名のデータ長をバイナリ形式で受信
+				sysread($report, my $str_len, 2);
+				
+				# 子プロセスからクエリー名を受信
+				sysread($report, $last_query, unpack("S", $str_len));
+				
+				# 子プロセスからクエリー配列長をバイナリ形式で受信
+				sysread($report, $query_len{$last_query}, 4);
+				
+				# クエリー配列長を数値に変換
+				$query_len{$last_query} = unpack("L", $query_len{$last_query});
+			}
 			
 			# サブジェクト名を更新
 			$last_subject = $col[1];
@@ -407,7 +419,7 @@ sub body {
 	}
 	
 	# 残りのヒットをアセンブル
-	$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assembly += scalar(map {keys(%{$_->{"assemble"}})} @{$assembled_hits{$last_query}{$last_subject}});
+	$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assembly += scalar(map {keys(%{$_->{"assemble"}})} @{$assembled_hits{$last_query}{$last_subject}}) if defined($last_query);
 	
 	# パイプを閉じる
 	close($report);
@@ -523,11 +535,10 @@ sub body {
 					my $summary_flag = 0;
 					
 					# 遺伝子構造予測の引数を定義
-					$query_file = "-q prot/$query.fa" if $opt{"g"} eq "exonerate";
-					$query_file = "prot/$query.fa" if $opt{"g"} eq "genewise";
+					$query_file = "-q 'prot/$query.fa'" if $opt{"g"} eq "exonerate";
+					$query_file = "'prot/$query.fa'" if $opt{"g"} eq "genewise";
 					$target_file = "-t nucl/locus$thread_id.fa" if $opt{"g"} eq "exonerate";
 					$target_file = "nucl/locus$thread_id.fa" if $opt{"g"} eq "genewise";
-					$query_file =~ s/\|/\\\|/g;
 					
 					# 遺伝子構造予測を実行
 					open(PREDICT, "-|", "$gene_prediction{$opt{g}} $query_file $target_file 2>/dev/null") or &exception::error("failed to execute gene prediction: $query vs $subject");
@@ -973,8 +984,8 @@ sub body {
 			# bedデータを確認
 			&common::check_bed(\@col, "$opt{n}$.");
 			
-			# 親プロセスにbedデータを送信 (-d未指定時)
-			syswrite($report, join("\t", @col) . "\n");
+			# 親プロセスにbedデータをバイナリ形式で送信
+			syswrite($report, pack("L/a*", pack($bed12_template, @col)));
 			
 			# 相同性検索を実行しない場合
 			next if !$opt{"d"};
@@ -994,8 +1005,8 @@ sub body {
 			my $query_seq = "";
 			
 			# データを変換
-			my @block_size = split(/,/, $col[10]);
-			my @block_start = split(/,/, $col[11]);
+			my @block_size = unpack("L*", $col[10]);
+			my @block_start = unpack("L*", $col[11]);
 			
 			# ブロックを連結
 			for (my $i = 0;$i < $col[9];$i++) {$query_seq .= substr($locus_seq, $block_start[$i], $block_size[$i]);}
@@ -1068,24 +1079,20 @@ sub body {
 				# クエリー名を更新
 				$last_query = $col[0];
 				
-				# 子プロセスからbedデータを受信しながら処理
-				while (my $line = <$report>) {
-					# 改行コードを除去
-					chomp($line);
+				# クエリー名が一致するまで処理
+				while ($bed_data[3] ne $last_query) {
+					# 子プロセスからbedデータのデータ長をバイナリ形式で受信
+					sysread($report, my $str_len, 4);
 					
-					# タブ文字でデータを分割
-					@bed_data = split(/\t/, $line);
+					# 子プロセスからbedデータをバイナリ形式で受信
+					sysread($report, my $dat, unpack("L", $str_len));
 					
-					# クエリー名が一致した場合
-					last if $bed_data[3] eq $last_query;
+					# bedデータを変換
+					@bed_data = unpack($bed12_template, $dat);
 				}
 				
 				# クエリー名が一致しなかった場合
 				&exception::error("query not found in bed data probably due to inconsistent data order") if $bed_data[3] ne $last_query;
-				
-				# データを変換
-				$bed_data[10] = pack("L*", split(/,/, $bed_data[10]));
-				$bed_data[11] = pack("L*", split(/,/, $bed_data[11]));
 				
 				# コンティグ名が変わった場合はコンティグ名を更新
 				$last_contig = $bed_data[0] if $bed_data[0] ne $last_contig;
@@ -1107,18 +1114,17 @@ sub body {
 	
 	# 相同性検索を利用しない場合 (-bまたは-d未指定時)
 	else {
-		# 子プロセスからデータを受信しながら処理
+		# 子プロセスからbedデータをバイナリ形式で受信しながら処理
 		print STDERR "Loading bed data...";
-		while (my $line = <$report>) {
-			# 改行コードを除去
-			chomp($line);
+		while (1) {
+			# 子プロセスからbedデータのデータ長をバイナリ形式で受信
+			sysread($report, my $str_len, 4) or last;
 			
-			# タブ文字でデータを分割
-			my @bed_data = split(/\t/, $line);
+			# 子プロセスからbedデータをバイナリ形式で受信
+			sysread($report, my $dat, unpack("L", $str_len));
 			
-			# データを変換
-			$bed_data[10] = pack("L*", split(/,/, $bed_data[10]));
-			$bed_data[11] = pack("L*", split(/,/, $bed_data[11]));
+			# bedデータを変換
+			@bed_data = unpack($bed12_template, $dat);
 			
 			# コンティグ名が変わった場合はコンティグ名を更新
 			$last_contig = $bed_data[0] if $bed_data[0] ne $last_contig;
@@ -1496,9 +1502,8 @@ sub body {
 				# 遺伝子構造予測の引数を定義
 				$query_file = "-q prot/ref$thread_id.fa" if $opt{"g"} eq "exonerate";
 				$query_file = "prot/ref$thread_id.fa" if $opt{"g"} eq "genewise";
-				$target_file = "-t nucl/$query.fa" if $opt{"g"} eq "exonerate";
-				$target_file = "nucl/$query.fa" if $opt{"g"} eq "genewise";
-				$target_file =~ s/\|/\\\|/g;
+				$target_file = "-t 'nucl/$query.fa'" if $opt{"g"} eq "exonerate";
+				$target_file = "'nucl/$query.fa'" if $opt{"g"} eq "genewise";
 				
 				# 遺伝子構造予測を実行
 				open(PREDICT, "-|", "$gene_prediction{$opt{g}} $query_file $target_file 2>/dev/null") or &exception::error("failed to execute gene prediction: $subject vs $query");
@@ -1887,8 +1892,14 @@ sub check_bed {
 	# 12列目が未定義の場合
 	$_[0]->[11] = 0 if !defined($_[0]->[11]);
 	
+	# 11列目をバイナリ形式に変換
+	$_[0]->[10] = pack("L*", split(/,/, $_[0]->[10]));
+	
+	# 12列目をバイナリ形式に変換
+	$_[0]->[11] = pack("L*", split(/,/, $_[0]->[11]));
+	
 	# 10列目の値と11列目および12列目の要素数が一致していない場合
-	&exception::error("bad format input") if $_[0]->[9] != split(/,/, $_[0]->[10]) or $_[0]->[9] != split(/,/, $_[0]->[11]);
+	&exception::error("bad format input") if $_[0]->[9] != length($_[0]->[10]) / 4 or $_[0]->[9] != length($_[0]->[11]) / 4;
 	
 	# 向きを数字に変換
 	$_[0]->[5] = $_[0]->[5] . "1";
