@@ -11,7 +11,7 @@ no warnings 'portable';
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.0.2";	# ソフトウェアのバージョン
+my $version = "ver.2.0.3";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -392,7 +392,7 @@ sub body {
 			# クエリー名が変わった場合
 			while (!defined($last_query) or $col[0] ne $last_query) {
 				# 子プロセスからクエリー名のデータ長をバイナリ形式で受信
-				sysread($report, my $str_len, 2);
+				sysread($report, my $str_len, 2) or &exception::error("query not found in homology search results probably due to inconsistent data order");
 				
 				# 子プロセスからクエリー名を受信
 				sysread($report, $last_query, unpack("S", $str_len));
@@ -1082,7 +1082,7 @@ sub body {
 				# クエリー名が一致するまで処理
 				while ($bed_data[3] ne $last_query) {
 					# 子プロセスからbedデータのデータ長をバイナリ形式で受信
-					sysread($report, my $str_len, 4);
+					sysread($report, my $str_len, 4) or &exception::error("query not found in bed data probably due to inconsistent data order");
 					
 					# 子プロセスからbedデータをバイナリ形式で受信
 					sysread($report, my $dat, unpack("L", $str_len));
@@ -1090,9 +1090,6 @@ sub body {
 					# bedデータを変換
 					@bed_data = unpack($bed12_template, $dat);
 				}
-				
-				# クエリー名が一致しなかった場合
-				&exception::error("query not found in bed data probably due to inconsistent data order") if $bed_data[3] ne $last_query;
 				
 				# コンティグ名が変わった場合はコンティグ名を更新
 				$last_contig = $bed_data[0] if $bed_data[0] ne $last_contig;
