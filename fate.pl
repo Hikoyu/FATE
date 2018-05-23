@@ -6,12 +6,12 @@
 use strict;
 use warnings;
 use Getopt::Std;
-no warnings 'portable';
+use threads;
 
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.0.3";	# ソフトウェアのバージョン
+my $version = "ver.2.1.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -33,7 +33,8 @@ my $specified_command = shift(@ARGV) if @command_list and @ARGV;
 my %option;
 ### 編集範囲 開始 ###
 $option{"w"} = "\tUse 2-byte line feed code (CR+LF) for input files";
-$option{"b PATH "} = "Path to blast output file (TSV format)";
+$option{"x"} = "\tDiscard the blast output file";
+$option{"b PATH "} = "Path to the blast output file (TSV format)";
 $option{"f STR "} = "Output format <bed|gtf> [bed]";
 $option{"n STR "} = "Prefix of each locus name [locus]";
 $option{"p INT "} = "Number of parallel worker threads <1-> [1]";
@@ -61,11 +62,12 @@ foreach (@option_list) {
 
 ### 編集範囲 開始 ###
 # 追加のモジュールを宣言
+use File::stat;
 use List::Util;
 use IPC::Open2;
 use IO::Pipe;
-use threads;
 use Thread::Queue;
+no warnings 'portable';
 
 # コドンを定義
 my %codon = (
@@ -128,7 +130,7 @@ sub main {
 	$opt{"v"} = 0 if !defined($opt{"v"});
 	
 	# 相同性検索の出力ファイルを確認 (-b指定時)
-	if ($opt{"b"}) {
+	if (defined($opt{"b"})) {
 		&exception::error("file not found: $opt{b}") if !-f $opt{"b"};
 		&exception::error("file unreadable: $opt{b}") if !-r $opt{"b"};
 		&exception::error("null file specified: $opt{b}") if !-s $opt{"b"};
@@ -174,6 +176,7 @@ sub error {
 	print STDERR ": Error: $_[0]";
 	print STDERR ": $_[1] line $." if $_[1];
 	print STDERR "\n";
+	threads->tid or map {$_->detach} threads->list;
 	exit(1);
 }
 
@@ -264,13 +267,20 @@ sub body {
 	);
 	
 	# オプションの処理を追加
-	foreach (keys(%homology_search)) {$homology_search{$_} .= `which tee` ? " 2>/dev/null | tee fate_search_$opt{h}.out" : "";}
+	foreach (keys(%homology_search)) {$homology_search{$_} .= (!$opt{"x"} and `which tee`) ? " 2>/dev/null | tee fate_search_$opt{h}.out" : "";}
 	$gene_prediction{"exonerate"} .= $opt{"s"} ? " --forcegtag T" : "";
 	$gene_prediction{"genewise"} .= $opt{"s"} ? "" : " -nosplice_gtag";
 	
-	# 個々の配列データを保存しておくディレクトリを作成 (-g指定時)
+	# 個々の配列データを保持しておくディレクトリを作成 (-g指定時)
 	mkdir("prot") or &exception::error("failed to make directory: prot") if $opt{"g"} and !-d "prot";
 	mkdir("nucl") or &exception::error("failed to make directory: nucl") if $opt{"g"} and !-d "nucl";
+	
+	# 現在の時刻を取得
+	my $timestamp = time;
+	
+	# 変数を宣言
+	my $task = (defined($opt{"b"}) ? "" : "homology search and ") . ($opt{"g"} ? "gene prediction" : "hit assembly");
+	print STDERR "Running $task...";
 	
 	# 相同性検索の出力ファイルを開く (-b指定時)
 	open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}") if $opt{"b"};
@@ -361,19 +371,263 @@ sub body {
 	# 相同性検索への入力を閉じる (-b未指定時)
 	close(SEARCH_IN) if !$opt{"b"};
 	
+	# 入出力のキューを作成
+	my $input = Thread::Queue->new;
+	my $output = Thread::Queue->new;
+	
+	# 指定したワーカースレッド数で並列処理 (-g指定時)
+	for (my $thread_id = 0;$opt{"g"} and $thread_id < $opt{"p"};$thread_id++) {
+		## ここからワーカースレッドの処理 ##
+		threads::async {
+			# ワーカースレッドのみを終了可能に変更
+			threads->set_thread_exit_only(1);
+			
+			# ゲノム配列のfastaファイルを開く
+			open(GENOME, "<", $genome_file) or &exception::error("failed to open file: $genome_file");
+			
+			# 入力キューからデータをバイナリ形式で取得して処理
+			while (defined(my $dat = $input->dequeue)) {
+				# データを変換
+				my ($subject, $locus_start, $locus_end, $query, $query_len, $strand, $mask_block_size, $mask_block_start) = unpack($bed6_mask_template, $dat);
+				
+				# 変数を宣言
+				my $faidx = &common::faidx_decode($genome_faidx->{$subject});
+				
+				# マスクブロックサイズとマスクブロック開始点リストを取得
+				my @mask_block_size = unpack("L*", $mask_block_size);
+				my @mask_block_start = unpack("L*", $mask_block_start);
+				
+				# フランキング配列長に合わせて開始点と終了点を修正
+				my $modified_locus_start = $locus_start - ($strand > 0 ? $opt{"5"} : $opt{"3"});
+				my $modified_locus_end = $locus_end + ($strand > 0 ? $opt{"3"} : $opt{"5"});
+				$modified_locus_start = 0 if $modified_locus_start < 0;
+				$modified_locus_end = $faidx->{"seq_length"} if $modified_locus_end > $faidx->{"seq_length"};
+				
+				# 取り出す領域の位置情報を算出
+				my $start_point = int($modified_locus_start / $faidx->{"row_width"}) * $faidx->{"row_bytes"} + $modified_locus_start % $faidx->{"row_width"};
+				my $end_point = int($modified_locus_end / $faidx->{"row_width"}) * $faidx->{"row_bytes"} + $modified_locus_end % $faidx->{"row_width"};
+				
+				# 領域の塩基配列を取得
+				seek(GENOME, $faidx->{"seq_start"} + $start_point, 0);
+				read(GENOME, my $locus_seq, $end_point - $start_point);
+				
+				# 配列中に含まれる改行コードを除去
+				$locus_seq =~ s/\n|\r//g;
+				
+				# 配列を大文字に変換
+				$locus_seq = uc($locus_seq);
+				
+				# 配列をマスク
+				for (my $i = 0;$i < @mask_block_size;$i++) {substr($locus_seq, $mask_block_start[$i] - $modified_locus_start, $mask_block_size[$i]) = "N" x $mask_block_size[$i];}
+				
+				# 相補鎖に変換
+				&common::complementary($locus_seq) if $strand < 0;
+				
+				# 領域開始点を表示形式に合わせる
+				$modified_locus_start++;
+				
+				# 領域名を定義
+				my $locus_name = "$subject:$modified_locus_start-$modified_locus_end";
+				$locus_name .= $strand > 0 ? "(+)" : "(-)";
+				
+				# 領域の配列ファイルを作成
+				open(NUCL, ">", "nucl/locus$thread_id.fa") or &exception::error("failed to make file: nucl/locus$thread_id.fa");
+				
+				# 取得した配列をファイルに出力
+				print NUCL ">$locus_name\n$locus_seq\n";
+				
+				# 領域の配列ファイルを閉じる
+				close(NUCL);
+				
+				# 変数を宣言
+				my @genes = ();
+				my $query_file = "";
+				my $target_file = "";
+				my $query_start = 0;
+				my $query_end = 0;
+				my $summary_flag = 0;
+				
+				# 遺伝子構造予測の引数を定義
+				$query_file = "-q prot/$query.fa" if $opt{"g"} eq "exonerate";
+				$query_file = "prot/$query.fa" if $opt{"g"} eq "genewise";
+				$target_file = "-t nucl/locus$thread_id.fa" if $opt{"g"} eq "exonerate";
+				$target_file = "nucl/locus$thread_id.fa" if $opt{"g"} eq "genewise";
+				$query_file =~ s/\|/\\\|/g;
+				
+				# 遺伝子構造予測を実行
+				open(PREDICT, "-|", "$gene_prediction{$opt{g}} $query_file $target_file 2>/dev/null") or &exception::error("failed to execute gene prediction: $query vs $subject");
+				
+				# 領域開始点をbed形式に戻す
+				$modified_locus_start--;
+				
+				# 遺伝子構造予測結果を1行ずつ読み込んで処理
+				while (my $line = <PREDICT>) {
+					# コメント行を除外
+					++$summary_flag and next if $line =~ /^["#"]/;
+					
+					# 空白文字でデータを分割
+					my @col = split(/\s+/, $line, 9);
+					
+					# 見出し行を除外
+					next if $col[0] eq "Bits" and $col[1] eq "Query" and $col[4] eq "Target";
+					
+					# summary行の処理 (-g genewise指定時)
+					($query_start, $query_end) = (($col[2] - 1) * 3, $col[3] * 3) and next if $opt{"g"} eq "genewise" and !($summary_flag & 0x01);
+					
+					# 開始点をbed形式に合わせる
+					$col[3]--;
+					
+					# match行またはgene行の処理
+					push(@genes, [$subject, $col[3], $col[4], $query, $col[5], $strand, 0, 0, ".", 0, [], [], $query_start, $query_end]) if $col[2] eq "match" or $col[2] eq "gene";
+					
+					# cds行の処理
+					++$genes[-1]->[9] and push(@{$genes[-1]->[10]}, $col[4] - $col[3]) and push(@{$genes[-1]->[11]}, $col[3]) if $col[2] eq "cds";
+					
+					# similarity行の処理 (-g exonerate指定時)
+					my @query_block = map {[split(/\s/)]} grep {/^Align/} split(/ ; /, $col[8]) if $opt{"g"} eq "exonerate" and $col[2] eq "similarity";
+					$genes[-1]->[12] = List::Util::min(map {($_->[2] - 1) * 3} @query_block) if @query_block;
+					$genes[-1]->[13] = List::Util::max(map {($_->[2] - 1) * 3 + $_->[3]} @query_block) if @query_block;
+				}
+				
+				# 遺伝子構造予測を終了
+				close(PREDICT);
+				
+				# 各遺伝子について翻訳領域を推定
+				foreach my $gene (@genes) {
+					# 変数を宣言
+					my $upstream_truncation = 0;
+					my $downstream_truncation = 0;
+					my $completeness = 0;
+					
+					# Nを含まない上流配列を取得し、その長さが指定値より短い場合は5'側truncateとする
+					my $upstream_seq = substr(substr($locus_seq, 0, $gene->[1]), -$opt{"5"});
+					my $upstream_offset = $strand > 0 ? $locus_start - $modified_locus_start - $gene->[1] : $modified_locus_end - $gene->[1] - $locus_end;
+					$upstream_offset = 0 if $upstream_offset < 0;
+					$upstream_seq =~ s/^.*N//;
+					$upstream_truncation = 1 if length($upstream_seq) < $opt{"5"} - $upstream_offset;
+					
+					# Nを含まない下流配列を取得し、その長さが指定値より短い場合は3'側truncateとする
+					my $downstream_seq = substr($locus_seq, $gene->[2], $opt{"3"});
+					my $downstream_offset = $strand > 0 ? $modified_locus_start + $gene->[2] - $locus_end : $locus_start - $modified_locus_end + $gene->[2];
+					$downstream_offset = 0 if $downstream_offset < 0;
+					$downstream_seq =~ s/N.*$//;
+					$downstream_truncation = 1 if length($downstream_seq) < $opt{"3"} - $downstream_offset;
+					
+					# 5'側クエリー被覆率が指定値以上の場合
+					if ($query_len - $gene->[12] >= $query_len * $opt{"c"}) {
+						# 上流フランキング領域のアミノ酸配列を取得
+						my $upstream_aa = &common::translate($upstream_seq, length($upstream_seq) % 3);
+						
+						# 先頭エキソンのアミノ酸配列を取得
+						my $first_exon_aa = &common::translate(substr($locus_seq, $gene->[11]->[0], $gene->[10]->[0]), 0);
+						
+						# 開始コドンを探索
+						my $start_pos = rindex($upstream_aa, "M");
+						my $stop_pos = rindex($upstream_aa, "*");
+						$start_pos = $stop_pos < $start_pos ? $start_pos - length($upstream_aa) : index($first_exon_aa, "M") + 1;
+						$start_pos -= $start_pos > 0;
+						$start_pos *= 3;
+						
+						# 開始コドンを考慮しても5'側クエリー被覆率が指定値以上の場合は先頭ブロックを修正
+						($gene->[10]->[0], $gene->[11]->[0]) = ($gene->[10]->[0] - $start_pos, $gene->[11]->[0] + $start_pos) if $query_len - $gene->[12] - $start_pos >= $query_len * $opt{"c"};
+						
+						# 5'端が完全であることを認定
+						$upstream_truncation = 0;
+						$completeness++;
+					}
+					
+					# 3'側クエリー被覆率が指定値以上の場合
+					if ($gene->[13] >= $query_len * $opt{"c"}) {
+						# 下流フランキング領域のアミノ酸配列を取得
+						my $downstream_aa = &common::translate($downstream_seq, 0);
+						
+						# 末尾エキソンのアミノ酸配列を取得
+						my $last_exon_aa = &common::translate(substr($locus_seq, $gene->[11]->[-1], $gene->[10]->[-1]), $gene->[10]->[-1] % 3);
+						
+						# 終止コドンを探索
+						my $terminal_pos = rindex($last_exon_aa, "*");
+						$terminal_pos = $terminal_pos < 0 ? index($downstream_aa, "*") : $terminal_pos - length($last_exon_aa);
+						$terminal_pos++;
+						$terminal_pos *= 3;
+						
+						# 終止コドンを考慮しても3'側クエリー被覆率が指定値以上の場合は末尾ブロックを修正
+						$gene->[10]->[-1] += $terminal_pos if $gene->[13] + $terminal_pos >= $query_len * $opt{"c"};
+						
+						# 3'端が完全であることを認定
+						$downstream_truncation = 0;
+						$completeness++;
+					}
+					
+					# 領域開始点・終了点を修正
+					($gene->[1], $gene->[2]) = ($gene->[11]->[0], $gene->[10]->[-1] + $gene->[11]->[-1]);
+					
+					# ブロックの基準点を修正
+					my $basal_pos = $gene->[11]->[0];
+					
+					# ブロックの相対位置を修正
+					$gene->[11] = [map {$_ - $basal_pos} @{$gene->[11]}];
+					
+					# 翻訳領域のアミノ酸配列を取得
+					my $cds = "";
+					for (my $i = 0;$i < $gene->[9];$i++) {$cds .= substr($locus_seq, $gene->[1] + $gene->[11]->[$i], $gene->[10]->[$i]);}
+					my $aa = &common::translate($cds, 0);
+					
+					# フレームシフトが存在する場合 (偽遺伝子)
+					if (List::Util::sum(@{$gene->[10]}) % 3 > 0) {$gene->[8] = "red";}
+					
+					# 終止コドンが末尾以外に存在する場合 (偽遺伝子)
+					elsif (index($aa, "*") >= 0 and index($aa, "*") < length($aa) - 1) {$gene->[8] = "red";}
+					
+					# 両末端が完全とみなされない場合 (分断遺伝子または偽遺伝子)
+					elsif ($completeness < 2) {$gene->[8] = $upstream_truncation | $downstream_truncation ? "yellow" : "red";}
+					
+					# 配列長が指定値未満の場合 (偽遺伝子)
+					elsif (List::Util::sum(@{$gene->[10]}) < $opt{"l"}) {$gene->[8] = "red";}
+					
+					# 上記に該当しない場合 (機能遺伝子)
+					else {$gene->[8] = "blue";}
+					
+					# ゲノム配列の座標でデータを修正
+					($gene->[1], $gene->[2]) = $strand > 0 ? ($modified_locus_start + $gene->[1], $modified_locus_start + $gene->[2]) : ($modified_locus_end - $gene->[2], $modified_locus_end - $gene->[1]);
+					($gene->[6], $gene->[7]) = ($gene->[1], $gene->[2]);
+					if ($strand < 0) {
+						$gene->[10] = [reverse(@{$gene->[10]})];
+						$gene->[11] = [reverse(@{$gene->[11]})];
+						for (my $i = 0;$i < @{$gene->[11]};$i++) {$gene->[11]->[$i] = $gene->[2] - $gene->[1] - $gene->[10]->[$i] - $gene->[11]->[$i];}
+					}
+					
+					# データをバイナリ形式に変換
+					$gene = pack($bed12_template, @{$gene}[0..9], pack("L*", @{$gene->[10]}), pack("L*", @{$gene->[11]}));
+				}
+				
+				# 出力キューにデータをバイナリ形式で追加
+				$output->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@genes), @genes));
+			}
+			
+			# ゲノム配列のfastaファイルを閉じる
+			close(GENOME);
+			
+			# スレッドを終了
+			return(1);
+		};
+		## ここまでワーカースレッドの処理 ##
+	}
+	
 	# 変数を宣言
-	my %assembled_hits = ();
+	my %loci = ();
 	my %query_len = ();
 	my @blast_hits = ();
 	my $last_query = undef;
 	my $last_subject = "";
-	my $num_assembly = 0;
+	my $assembly_data = [];
+	my $num_assemblies = 0;
+	my $num_data = 0;
+	my $fin_data = 0;
 	
 	# パイプを開く
 	$report->reader;
 	
 	# 相同性検索の出力を読み込みながら処理
-	print STDERR $opt{"b"} ? "Loading homology search results..." : "Running homology search...";
 	while (my $line = <SEARCH_OUT>) {
 		# コメント行を除外
 		next if $line =~ /^["#"]/;
@@ -387,10 +641,28 @@ sub body {
 		# クエリー名またはサブジェクト名が変わった場合
 		if (!defined($last_query) or $col[0] ne $last_query or $col[1] ne $last_subject) {
 			# ここまでのヒットをアセンブル
-			$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assembly += scalar(map {keys(%{$_->{"assemble"}})} @{$assembled_hits{$last_query}{$last_subject}}) if defined($last_query);
+			$assembly_data = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assemblies += scalar(map {keys(%{$_->{"assembly"}})} @{$assembly_data}) if defined($last_query);
+			
+			# 各遺伝子座について処理
+			foreach my $locus (@{$assembly_data}) {
+				# 各アセンブリーについて処理
+				foreach my $assembly (values(%{$locus->{"assembly"}})) {
+					# 入力キューにアセンブリーデータをバイナリ形式で追加 (-g指定時)
+					$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if $opt{"g"};
+					
+					# ハッシュにアセンブリーデータをバイナリ形式で登録 (-g未指定時)
+					push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, ".", scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) if !$opt{"g"};
+				}
+			}
 			
 			# クエリー名が変わった場合
 			while (!defined($last_query) or $col[0] ne $last_query) {
+				# 現在のクエリーファイル数を取得 (-g指定時)
+				$num_data = grep {$_->uid == $> and $_->mtime >= $timestamp} map {File::stat::stat($_)} glob("prot/*.fa") if $opt{"g"};
+				
+				# 経過を表示
+				print STDERR "\rRunning $task...", int($fin_data / $num_data * 100), "%" if $num_data and int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
+				
 				# 子プロセスからクエリー名のデータ長をバイナリ形式で受信
 				sysread($report, my $str_len, 2) or &exception::error("query not found in homology search results probably due to inconsistent data order");
 				
@@ -402,6 +674,9 @@ sub body {
 				
 				# クエリー配列長を数値に変換
 				$query_len{$last_query} = unpack("L", $query_len{$last_query});
+				
+				# 完了データ数を更新
+				$fin_data++;
 			}
 			
 			# サブジェクト名を更新
@@ -413,13 +688,28 @@ sub body {
 		
 		# 検索結果をヒットリストに追加
 		push(@blast_hits, $col[8] < $col[9] ? {"query_start" => $col[6] - 1, "query_end" => $col[7], "locus_start" => $col[8] - 1, "locus_end" => $col[9], "strand" => 1} : {"query_start" => $col[7], "query_end" => $col[6] - 1, "locus_start" => $col[9] - 1, "locus_end" => $col[8], "strand" => -1});
-		$blast_hits[-1]->{"assemble"} = {};
+		$blast_hits[-1]->{"assembly"} = {};
 		$blast_hits[-1]->{"score"} = $col[11];
 		$blast_hits[-1]->{"num_connection"} = 0;
 	}
 	
 	# 残りのヒットをアセンブル
-	$assembled_hits{$last_query}{$last_subject} = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assembly += scalar(map {keys(%{$_->{"assemble"}})} @{$assembled_hits{$last_query}{$last_subject}}) if defined($last_query);
+	$assembly_data = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assemblies += scalar(map {keys(%{$_->{"assembly"}})} @{$assembly_data}) if defined($last_query);
+	
+	# 各遺伝子座について処理
+	foreach my $locus (@{$assembly_data}) {
+		# 各アセンブリーについて処理
+		foreach my $assembly (values(%{$locus->{"assembly"}})) {
+			# 入力キューにアセンブリーデータをバイナリ形式で追加 (-g指定時)
+			$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if $opt{"g"};
+			
+			# ハッシュにアセンブリーデータをバイナリ形式で登録 (-g未指定時)
+			push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, ".", scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) if !$opt{"g"};
+		}
+	}
+	
+	# 入力キューにワーカースレッドの数だけ未定義値を追加 (-g指定時)
+	for (my $thread_id = 0;$opt{"g"} and $thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
 	
 	# パイプを閉じる
 	close($report);
@@ -432,326 +722,29 @@ sub body {
 	
 	# 子プロセスが異常終了した場合
 	&exception::error("process abnormally exited") if $?;
-	print STDERR "completed\n";
+	
+	# 変数を宣言
+	my $fin_threads = $opt{"g"} ? 0 : $opt{"p"};
+	
+	# 各ワーカースレッドが終了するまで待機
+	foreach (threads->list) {$_->join and $fin_threads++;}
+	
+	# ワーカースレッドが異常終了した場合
+	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
+	print STDERR "\rRunning $task...completed\n";
 	
 	# 相同性検索でヒットが得られなかった場合
 	&exception::error("no hits found from $opt{h} search") if !defined($last_query);
 	
-	# 変数を宣言
-	my %loci = ();
-	
-	# 遺伝子構造予測を実施する場合 (-g指定時)
-	if ($opt{"g"}) {
-		# 入出力のキューを作成
-		my $input = Thread::Queue->new;
-		my $output = Thread::Queue->new;
-		
-		# 入力キューにアセンブルデータをバイナリ形式で追加
-		print STDERR "Running gene prediction...";
-		foreach my $query (keys(%assembled_hits)) {
-			foreach my $subject (keys(%{$assembled_hits{$query}})) {
-				foreach my $locus (@{$assembled_hits{$query}{$subject}}) {
-					foreach my $assemble (values(%{$locus->{"assemble"}})) {
-						$input->enqueue(pack($bed6_mask_template, $subject, $locus->{"locus_start"}, $assemble->{"locus_destination"}, $query, $opt{"h"} =~ /^tblastn/ ? $query_len{$query} * 3 : $query_len{$query}, $locus->{"strand"}, pack("L*", @{$assemble->{"mask_block_size"}}), pack("L*", @{$assemble->{"mask_block_start"}})));
-					}
-				}
-			}
-		}
-		print STDERR "\rRunning gene prediction...0%";
-		
-		# 変数を宣言
-		my $num_data = $input->pending;
-		
-		# 指定したワーカースレッド数で並列処理
-		for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
-			## ここからワーカースレッドの処理 ##
-			threads::async {
-				# ワーカースレッドのみを終了可能に変更
-				threads->set_thread_exit_only(1);
-				
-				# ゲノム配列のfastaファイルを開く
-				open(GENOME, "<", $genome_file) or &exception::error("failed to open file: $genome_file");
-				
-				# 入力キューからデータをバイナリ形式で取得して処理
-				while (defined(my $dat = $input->dequeue_nb)) {
-					# データを変換
-					my ($subject, $locus_start, $locus_end, $query, $query_len, $strand, $mask_block_size, $mask_block_start) = unpack($bed6_mask_template, $dat);
-					
-					# 変数を宣言
-					my $faidx = &common::faidx_decode($genome_faidx->{$subject});
-					
-					# マスクブロックサイズとマスクブロック開始点リストを取得
-					my @mask_block_size = unpack("L*", $mask_block_size);
-					my @mask_block_start = unpack("L*", $mask_block_start);
-					
-					# フランキング配列長に合わせて開始点と終了点を修正
-					my $modified_locus_start = $strand > 0 ? $locus_start - $opt{"5"} : $locus_start - $opt{"3"};
-					my $modified_locus_end = $strand > 0 ? $locus_end + $opt{"3"} : $locus_end + $opt{"5"};
-					$modified_locus_start = 0 if $modified_locus_start < 0;
-					$modified_locus_end = $faidx->{"seq_length"} if $modified_locus_end > $faidx->{"seq_length"};
-					
-					# 取り出す領域の位置情報を算出
-					my $start_point = int($modified_locus_start / $faidx->{"row_width"}) * $faidx->{"row_bytes"} + $modified_locus_start % $faidx->{"row_width"};
-					my $end_point = int($modified_locus_end / $faidx->{"row_width"}) * $faidx->{"row_bytes"} + $modified_locus_end % $faidx->{"row_width"};
-					
-					# 領域の塩基配列を取得
-					seek(GENOME, $faidx->{"seq_start"} + $start_point, 0);
-					read(GENOME, my $locus_seq, $end_point - $start_point);
-					
-					# 配列中に含まれる改行コードを除去
-					$locus_seq =~ s/\n|\r//g;
-					
-					# 配列を大文字に変換
-					$locus_seq = uc($locus_seq);
-					
-					# 配列をマスク
-					for (my $i = 0;$i < @mask_block_size;$i++) {substr($locus_seq, $mask_block_start[$i] - $modified_locus_start, $mask_block_size[$i]) = "N" x $mask_block_size[$i];}
-					
-					# 相補鎖に変換
-					&common::complementary($locus_seq) if $strand < 0;
-					
-					# 領域開始点を表示形式に合わせる
-					$modified_locus_start++;
-					
-					# 領域名を定義
-					my $locus_name = "$subject:$modified_locus_start-$modified_locus_end";
-					$locus_name .= $strand > 0 ? "(+)" : "(-)";
-					
-					# 領域の配列ファイルを作成
-					open(NUCL, ">", "nucl/locus$thread_id.fa") or &exception::error("failed to make file: nucl/locus$thread_id.fa");
-					
-					# 取得した配列をファイルに出力
-					print NUCL ">$locus_name\n$locus_seq\n";
-					
-					# 領域の配列ファイルを閉じる
-					close(NUCL);
-					
-					# 変数を宣言
-					my @genes = ();
-					my $query_file = "";
-					my $target_file = "";
-					my $query_start = 0;
-					my $query_end = 0;
-					my $summary_flag = 0;
-					
-					# 遺伝子構造予測の引数を定義
-					$query_file = "-q 'prot/$query.fa'" if $opt{"g"} eq "exonerate";
-					$query_file = "'prot/$query.fa'" if $opt{"g"} eq "genewise";
-					$target_file = "-t nucl/locus$thread_id.fa" if $opt{"g"} eq "exonerate";
-					$target_file = "nucl/locus$thread_id.fa" if $opt{"g"} eq "genewise";
-					
-					# 遺伝子構造予測を実行
-					open(PREDICT, "-|", "$gene_prediction{$opt{g}} $query_file $target_file 2>/dev/null") or &exception::error("failed to execute gene prediction: $query vs $subject");
-					
-					# 領域開始点をbed形式に戻す
-					$modified_locus_start--;
-					
-					# 遺伝子構造予測結果を1行ずつ読み込んで処理
-					while (my $line = <PREDICT>) {
-						# コメント行を除外
-						++$summary_flag and next if $line =~ /^["#"]/;
-						
-						# 空白文字でデータを分割
-						my @col = split(/\s+/, $line, 9);
-						
-						# 見出し行を除外
-						next if $col[0] eq "Bits" and $col[1] eq "Query" and $col[4] eq "Target";
-						
-						# summary行の処理 (-g genewise指定時)
-						($query_start, $query_end) = (($col[2] - 1) * 3, $col[3] * 3) and next if $opt{"g"} eq "genewise" and !($summary_flag & 0x01);
-						
-						# 開始点をbed形式に合わせる
-						$col[3]--;
-						
-						# match行またはgene行の処理
-						push(@genes, [$subject, $col[3], $col[4], $query, $col[5], $strand, 0, 0, ".", 0, [], [], $query_start, $query_end]) if $col[2] eq "match" or $col[2] eq "gene";
-						
-						# cds行の処理
-						++$genes[-1]->[9] and push(@{$genes[-1]->[10]}, $col[4] - $col[3]) and push(@{$genes[-1]->[11]}, $col[3]) if $col[2] eq "cds";
-						
-						# similarity行の処理 (-g exonerate指定時)
-						my @query_block = map {[split(/\s/)]} grep {/^Align/} split(/ ; /, $col[8]) if $opt{"g"} eq "exonerate" and $col[2] eq "similarity";
-						$genes[-1]->[12] = List::Util::min(map {($_->[2] - 1) * 3} @query_block) if @query_block;
-						$genes[-1]->[13] = List::Util::max(map {($_->[2] - 1) * 3 + $_->[3]} @query_block) if @query_block;
-					}
-					
-					# 遺伝子構造予測を終了
-					close(PREDICT);
-					
-					# 各遺伝子について翻訳領域を推定
-					foreach my $gene (@genes) {
-						# 変数を宣言
-						my $upstream_truncation = 0;
-						my $downstream_truncation = 0;
-						my $completeness = 0;
-						
-						# Nを含まない上流配列を取得し、その長さが指定値より短い場合は5'側truncateとする
-						my $upstream_seq = substr(substr($locus_seq, 0, $gene->[1]), -$opt{"5"});
-						my $upstream_offset = $strand > 0 ? $locus_start - $modified_locus_start - $gene->[1] : $modified_locus_end - $gene->[1] - $locus_end;
-						$upstream_offset = 0 if $upstream_offset < 0;
-						$upstream_seq =~ s/^.*N//;
-						$upstream_truncation = 1 if length($upstream_seq) < $opt{"5"} - $upstream_offset;
-						
-						# Nを含まない下流配列を取得し、その長さが指定値より短い場合は3'側truncateとする
-						my $downstream_seq = substr($locus_seq, $gene->[2], $opt{"3"});
-						my $downstream_offset = $strand > 0 ? $modified_locus_start + $gene->[2] - $locus_end : $locus_start - $modified_locus_end + $gene->[2];
-						$downstream_offset = 0 if $downstream_offset < 0;
-						$downstream_seq =~ s/N.*$//;
-						$downstream_truncation = 1 if length($downstream_seq) < $opt{"3"} - $downstream_offset;
-						
-						# 5'側クエリー被覆率が指定値以上の場合
-						if ($query_len - $gene->[12] >= $query_len * $opt{"c"}) {
-							# 上流フランキング領域のアミノ酸配列を取得
-							my $upstream_aa = &common::translate($upstream_seq, length($upstream_seq) % 3);
-							
-							# 先頭エキソンのアミノ酸配列を取得
-							my $first_exon_aa = &common::translate(substr($locus_seq, $gene->[11]->[0], $gene->[10]->[0]), 0);
-							
-							# 開始コドンを探索
-							my $start_pos = rindex($upstream_aa, "M");
-							my $stop_pos = rindex($upstream_aa, "*");
-							$start_pos = $stop_pos < $start_pos ? $start_pos - length($upstream_aa) : index($first_exon_aa, "M") + 1;
-							$start_pos -= $start_pos > 0;
-							$start_pos *= 3;
-							
-							# 開始コドンを考慮しても5'側クエリー被覆率が指定値以上の場合は先頭ブロックを修正
-							($gene->[10]->[0], $gene->[11]->[0]) = ($gene->[10]->[0] - $start_pos, $gene->[11]->[0] + $start_pos) if $query_len - $gene->[12] - $start_pos >= $query_len * $opt{"c"};
-							
-							# 5'端が完全であることを認定
-							$upstream_truncation = 0;
-							$completeness++;
-						}
-						
-						# 3'側クエリー被覆率が指定値以上の場合
-						if ($gene->[13] >= $query_len * $opt{"c"}) {
-							# 下流フランキング領域のアミノ酸配列を取得
-							my $downstream_aa = &common::translate($downstream_seq, 0);
-							
-							# 末尾エキソンのアミノ酸配列を取得
-							my $last_exon_aa = &common::translate(substr($locus_seq, $gene->[11]->[-1], $gene->[10]->[-1]), $gene->[10]->[-1] % 3);
-							
-							# 終止コドンを探索
-							my $terminal_pos = rindex($last_exon_aa, "*");
-							$terminal_pos = $terminal_pos < 0 ? index($downstream_aa, "*") : $terminal_pos - length($last_exon_aa);
-							$terminal_pos++;
-							$terminal_pos *= 3;
-							
-							# 終止コドンを考慮しても3'側クエリー被覆率が指定値以上の場合は末尾ブロックを修正
-							$gene->[10]->[-1] += $terminal_pos if $gene->[13] + $terminal_pos >= $query_len * $opt{"c"};
-							
-							# 3'端が完全であることを認定
-							$downstream_truncation = 0;
-							$completeness++;
-						}
-						
-						# 領域開始点・終了点を修正
-						($gene->[1], $gene->[2]) = ($gene->[11]->[0], $gene->[10]->[-1] + $gene->[11]->[-1]);
-						
-						# ブロックの基準点を修正
-						my $basal_pos = $gene->[11]->[0];
-						
-						# ブロックの相対位置を修正
-						$gene->[11] = [map {$_ - $basal_pos} @{$gene->[11]}];
-						
-						# 翻訳領域のアミノ酸配列を取得
-						my $cds = "";
-						for (my $i = 0;$i < $gene->[9];$i++) {$cds .= substr($locus_seq, $gene->[1] + $gene->[11]->[$i], $gene->[10]->[$i]);}
-						my $aa = &common::translate($cds, 0);
-						
-						# フレームシフトが存在する場合 (偽遺伝子)
-						if (List::Util::sum(@{$gene->[10]}) % 3 > 0) {$gene->[8] = "red";}
-						
-						# 終止コドンが末尾以外に存在する場合 (偽遺伝子)
-						elsif (index($aa, "*") >= 0 and index($aa, "*") < length($aa) - 1) {$gene->[8] = "red";}
-						
-						# 両末端が完全とみなされない場合 (分断遺伝子または偽遺伝子)
-						elsif ($completeness < 2) {$gene->[8] = $upstream_truncation | $downstream_truncation ? "yellow" : "red";}
-						
-						# 配列長が指定値未満の場合 (偽遺伝子)
-						elsif (List::Util::sum(@{$gene->[10]}) < $opt{"l"}) {$gene->[8] = "red";}
-						
-						# 上記に該当しない場合 (機能遺伝子)
-						else {$gene->[8] = "blue";}
-						
-						# ゲノム配列の座標でデータを修正
-						($gene->[1], $gene->[2]) = $strand > 0 ? ($modified_locus_start + $gene->[1], $modified_locus_start + $gene->[2]) : ($modified_locus_end - $gene->[2], $modified_locus_end - $gene->[1]);
-						($gene->[6], $gene->[7]) = ($gene->[1], $gene->[2]);
-						if ($strand < 0) {
-							$gene->[10] = [reverse(@{$gene->[10]})];
-							$gene->[11] = [reverse(@{$gene->[11]})];
-							for (my $i = 0;$i < @{$gene->[11]};$i++) {$gene->[11]->[$i] = $gene->[2] - $gene->[1] - $gene->[10]->[$i] - $gene->[11]->[$i];}
-						}
-						
-						# データをバイナリ形式に変換
-						$gene = pack($bed12_template, @{$gene}[0..9], pack("L*", @{$gene->[10]}), pack("L*", @{$gene->[11]}));
-					}
-					
-					# 出力キューにデータをバイナリ形式で追加
-					$output->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@genes), @genes));
-					
-					# 完了データ数を取得
-					my $fin_data = $output->pending;
-					
-					# 経過を表示
-					print STDERR "\rRunning gene prediction...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
-				}
-				
-				# ゲノム配列のfastaファイルを閉じる
-				close(GENOME);
-				
-				# スレッドを終了
-				return(1);
-			};
-			## ここまでワーカースレッドの処理 ##
-		}
-		
-		# 変数を宣言
-		my $fin_threads = 0;
-		
-		# 各ワーカースレッドが終了するまで待機
-		foreach (threads->list) {$_->join and $fin_threads++;}
-		
-		# ワーカースレッドが異常終了した場合
-		&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
-		
-		# 出力キューからデータをバイナリ形式で取得して処理
-		while (my $dat = $output->dequeue_nb) {
-			# データを変換
-			my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
-			
-			# ハッシュにデータをバイナリ形式で登録
-			push(@{$loci{$subject}}, @locus) if @locus;
-		}
-		print STDERR "\rRunning gene prediction...completed\n";
-	}
-	
-	# 遺伝子構造予測を実施しない場合 (-g未指定時)
-	else {
-		# ハッシュにアセンブルデータをバイナリ形式で登録
-		print STDERR "Loading assembled loci...";
-		foreach my $query (keys(%assembled_hits)) {
-			foreach my $subject (keys(%{$assembled_hits{$query}})) {
-				foreach my $locus (@{$assembled_hits{$query}{$subject}}) {
-					foreach my $assemble (values(%{$locus->{"assemble"}})) {
-						push(@{$loci{$subject}}, pack($bed12_template, $subject, $locus->{"locus_start"}, $assemble->{"locus_destination"}, $query, $assemble->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assemble->{"locus_destination"}, ".", scalar(@{$assemble->{"block_size"}}), pack("L*", @{$assemble->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assemble->{"block_start"}})));
-					}
-				}
-			}
-		}
-		print STDERR "completed\n";
-	}
-	
-	# 入出力のキューを作成
-	my $input = Thread::Queue->new;
-	my $output = Thread::Queue->new;
-	
-	# 入力キューにアセンブルデータをバイナリ形式で追加
+	# 出力キューからデータをバイナリ形式で取得して処理
 	print STDERR "Running isoform definition...";
-	foreach my $subject (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}}));}
-	print STDERR "\rRunning isoform definition...0%";
-	
-	# 変数を宣言
-	my $num_data = $input->pending;
+	while (defined(my $dat = $output->dequeue_nb)) {
+		# データを変換
+		my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+		
+		# ハッシュにデータをバイナリ形式で登録
+		push(@{$loci{$subject}}, @locus) if @locus;
+	}
 	
 	# 指定したワーカースレッド数で並列処理
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
@@ -761,7 +754,7 @@ sub body {
 			threads->set_thread_exit_only(1);
 			
 			# 入力キューからデータをバイナリ形式で取得して処理
-			while (defined(my $dat = $input->dequeue_nb)) {
+			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
 				my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
 				
@@ -770,12 +763,6 @@ sub body {
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
 				$output->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$isoforms}), @{$isoforms}));
-				
-				# 完了データ数を取得
-				my $fin_data = $output->pending;
-				
-				# 経過を表示
-				print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
 			}
 			
 			# スレッドを終了
@@ -784,8 +771,27 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# 変数を宣言
-	my $fin_threads = 0;
+	# 変数をリセット
+	$num_data = keys(%loci);
+	$fin_data = 0;
+	
+	# 各遺伝子座について処理
+	foreach my $subject (keys(%loci)) {
+		# 経過を表示
+		print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
+		
+		# 入力キューにデータをバイナリ形式で追加
+		$input->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}}));
+		
+		# 完了データ数を更新
+		$fin_data++;
+	}
+	
+	# 入力キューにワーカースレッドの数だけ未定義値を追加
+	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
+	
+	# 変数をリセット
+	$fin_threads = 0;
 	
 	# 各ワーカースレッドが終了するまで待機
 	foreach (threads->list) {$_->join and $fin_threads++;}
@@ -797,7 +803,7 @@ sub body {
 	my $gene_id = 0;
 	
 	# 出力キューからデータをバイナリ形式で取得して処理
-	while (my $dat = $output->dequeue_nb) {
+	while (defined(my $dat = $output->dequeue_nb)) {
 		# データを変換
 		my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
 		
@@ -814,7 +820,7 @@ sub body {
 # 相同性検索ヒットのアセンブル search::assemble(相同性検索ヒットリストリファレンス, 最大ヒット間距離, 最大許容クエリー境界オーバーラップ/ギャップ)
 sub assemble {
 	# 変数を宣言
-	my $assemble_id = 0;
+	my $assembly_id = 0;
 	
 	# ヒットを領域開始点と領域終了点の順で並べ替え
 	my @sorted_hits = sort {$a->{"locus_start"} <=> $b->{"locus_start"} or $a->{"locus_end"} <=> $b->{"locus_end"}} @{$_[0]};
@@ -843,36 +849,36 @@ sub assemble {
 			my @mask_block_size = map {$_->{"locus_end"} - $_->{"locus_start"}} @mask_block;
 			my @mask_block_start = map {$_->{"locus_start"}} @mask_block;
 			
-			# 各アセンブルIDについて処理
-			foreach (keys(%{$sorted_hits[$k]->{"assemble"}})) {
-				# 総スコアが更新されない同一IDのアセンブルを除外
-				next if exists($sorted_hits[$i]->{"assemble"}->{$_}) and $sorted_hits[$i]->{"assemble"}->{$_}->{"total_score"} >= $sorted_hits[$i]->{"score"} + $sorted_hits[$k]->{"assemble"}->{$_}->{"total_score"};
+			# 各アセンブリーIDについて処理
+			foreach (keys(%{$sorted_hits[$k]->{"assembly"}})) {
+				# 総スコアが更新されない同一IDのアセンブリーを除外
+				next if exists($sorted_hits[$i]->{"assembly"}->{$_}) and $sorted_hits[$i]->{"assembly"}->{$_}->{"total_score"} >= $sorted_hits[$i]->{"score"} + $sorted_hits[$k]->{"assembly"}->{$_}->{"total_score"};
 				
 				# データを更新
-				$sorted_hits[$i]->{"assemble"}->{$_} = {
-					"total_score" => $sorted_hits[$i]->{"score"} + $sorted_hits[$k]->{"assemble"}->{$_}->{"total_score"},
-					"locus_destination" => $sorted_hits[$k]->{"assemble"}->{$_}->{"locus_destination"},
-					"block_size" => [$sorted_hits[$i]->{"locus_end"} - $sorted_hits[$i]->{"locus_start"}, @{$sorted_hits[$k]->{"assemble"}->{$_}->{"block_size"}}],
-					"block_start" => [$sorted_hits[$i]->{"locus_start"}, @{$sorted_hits[$k]->{"assemble"}->{$_}->{"block_start"}}],
-					"mask_block_size" => [@mask_block_size, @{$sorted_hits[$k]->{"assemble"}->{$_}->{"mask_block_size"}}],
-					"mask_block_start" => [@mask_block_start, @{$sorted_hits[$k]->{"assemble"}->{$_}->{"mask_block_start"}}]
+				$sorted_hits[$i]->{"assembly"}->{$_} = {
+					"total_score" => $sorted_hits[$i]->{"score"} + $sorted_hits[$k]->{"assembly"}->{$_}->{"total_score"},
+					"locus_destination" => $sorted_hits[$k]->{"assembly"}->{$_}->{"locus_destination"},
+					"block_size" => [$sorted_hits[$i]->{"locus_end"} - $sorted_hits[$i]->{"locus_start"}, @{$sorted_hits[$k]->{"assembly"}->{$_}->{"block_size"}}],
+					"block_start" => [$sorted_hits[$i]->{"locus_start"}, @{$sorted_hits[$k]->{"assembly"}->{$_}->{"block_start"}}],
+					"mask_block_size" => [@mask_block_size, @{$sorted_hits[$k]->{"assembly"}->{$_}->{"mask_block_size"}}],
+					"mask_block_start" => [@mask_block_start, @{$sorted_hits[$k]->{"assembly"}->{$_}->{"mask_block_start"}}]
 				};
 			}
 			$sorted_hits[$k]->{"num_connection"}++;
 		}
 		
-		# 末尾ヒットの場合はデータを新規登録し、アセンブルIDを更新
-		$sorted_hits[$i]->{"assemble"}->{$assemble_id} = {
+		# 末尾ヒットの場合はデータを新規登録し、アセンブリーIDを更新
+		$sorted_hits[$i]->{"assembly"}->{$assembly_id} = {
 			"total_score" => $sorted_hits[$i]->{"score"},
 			"locus_destination" => $sorted_hits[$i]->{"locus_end"},
 			"block_size" => [$sorted_hits[$i]->{"locus_end"} - $sorted_hits[$i]->{"locus_start"}],
 			"block_start" => [$sorted_hits[$i]->{"locus_start"}],
 			"mask_block_size" => [],
 			"mask_block_start" => []
-		} and $assemble_id++ if !%{$sorted_hits[$i]->{"assemble"}};
+		} and $assembly_id++ if !%{$sorted_hits[$i]->{"assembly"}};
 	}
 	
-	# アセンブルデータリストのリファレンスを返す
+	# アセンブリーデータリストのリファレンスを返す
 	return([grep {!$_->{"num_connection"}} @sorted_hits]);
 }
 
@@ -883,7 +889,7 @@ package filter;
 sub define {
 	$note = "Filter already annotated protein-coding regions under specified conditions.";
 	$usage = "<genome.fna> <STDIN|in1.bed> [in2.bed ...] [>out.bed|>out.gtf]";
-	$option{"d PATH "} = "Path to gene/protein database file (FASTA format)";
+	$option{"d PATH "} = "Path to a gene/protein database file (FASTA format)";
 	$option{"h STR "} = "Homology search engine <blastn|dc-megablast|megablast|blastx|blastx-fast> [blastn]";
 	$option{"k STR "} = "Keywords for filtering (AND[&], OR[;], BUT[!])";
 	$option{"r INT "} = "Cutoff rank of hits <1->";
@@ -936,7 +942,11 @@ sub body {
 	) if $opt{"d"};
 	
 	# オプションの処理を追加
-	foreach (keys(%homology_search)) {$homology_search{$_} .= `which tee` ? " 2>/dev/null | tee fate_filter_$opt{h}.out" : "";}
+	foreach (keys(%homology_search)) {$homology_search{$_} .= (!$opt{"x"} and `which tee`) ? " 2>/dev/null | tee fate_filter_$opt{h}.out" : "";}
+	
+	# 変数を宣言
+	my $task = ($opt{"b"} or $opt{"d"}) ? "Running homology search" : "Loading bed data";
+	print STDERR "$task...";
 	
 	# 相同性検索の出力ファイルを開く (-b指定時)
 	open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}") if $opt{"b"};
@@ -1048,7 +1058,6 @@ sub body {
 	# 相同性検索を利用する場合 (-bまたは-d指定時)
 	if ($opt{"b"} or $opt{"d"}) {
 		# 相同性検索の出力を読み込みながら処理
-		print STDERR $opt{"b"} ? "Loading homology search results..." : "Running homology search...";
 		while (my $line = <SEARCH_OUT>) {
 			# コメント行を除外
 			next if $line =~ /^["#"]/;
@@ -1112,7 +1121,6 @@ sub body {
 	# 相同性検索を利用しない場合 (-bまたは-d未指定時)
 	else {
 		# 子プロセスからbedデータをバイナリ形式で受信しながら処理
-		print STDERR "Loading bed data...";
 		while (1) {
 			# 子プロセスからbedデータのデータ長をバイナリ形式で受信
 			sysread($report, my $str_len, 4) or last;
@@ -1148,15 +1156,8 @@ sub body {
 	my $input = Thread::Queue->new;
 	my $output = Thread::Queue->new;
 	
-	# 入力キューにデータをバイナリ形式で追加
-	print STDERR "Running isoform definition...";
-	foreach my $contig (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}})) if @{$loci{$contig}};}
-	print STDERR "\rRunning isoform definition...0%";
-	
-	# 変数を宣言
-	my $num_data = $input->pending;
-	
 	# 指定したワーカースレッド数で並列処理
+	print STDERR "Running isoform definition...";
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
 		threads::async {
@@ -1164,7 +1165,7 @@ sub body {
 			threads->set_thread_exit_only(1);
 			
 			# 入力キューからデータをバイナリ形式で取得して処理
-			while (defined(my $dat = $input->dequeue_nb)) {
+			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
 				my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
 				
@@ -1173,12 +1174,6 @@ sub body {
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
 				$output->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$isoforms}), @{$isoforms}));
-				
-				# 完了データ数を取得
-				my $fin_data = $output->pending;
-				
-				# 経過を表示
-				print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
 			}
 			
 			# スレッドを終了
@@ -1186,6 +1181,25 @@ sub body {
 		};
 		## ここまでワーカースレッドの処理 ##
 	}
+	
+	# 変数を宣言
+	my $num_data = keys(%loci);
+	my $fin_data = 0;
+	
+	# 各コンティグについて処理
+	foreach my $contig (keys(%loci)) {
+		# 経過を表示
+		print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
+		
+		# 入力キューにデータをバイナリ形式で追加
+		$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}}));
+		
+		# 完了データ数を更新
+		$fin_data++;
+	}
+	
+	# 入力キューにワーカースレッドの数だけ未定義値を追加
+	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
 	
 	# 変数を宣言
 	my $fin_threads = 0;
@@ -1200,7 +1214,7 @@ sub body {
 	my $gene_id = 0;
 	
 	# 出力キューからデータをバイナリ形式で取得して処理
-	while (my $dat = $output->dequeue_nb) {
+	while (defined(my $dat = $output->dequeue_nb)) {
 		# データを変換
 		my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
 		
@@ -1283,13 +1297,20 @@ sub body {
 	);
 	
 	# オプションの処理を追加
-	foreach (keys(%homology_search)) {$homology_search{$_} .= `which tee` ? " 2>/dev/null | tee fate_predict_$opt{h}.out" : "";}
+	foreach (keys(%homology_search)) {$homology_search{$_} .= (!$opt{"x"} and `which tee`) ? " 2>/dev/null | tee fate_predict_$opt{h}.out" : "";}
 	$gene_prediction{"exonerate"} .= $opt{"s"} ? " -r F" : " -r T";
 	$gene_prediction{"genewise"} .= $opt{"s"} ? " -tfor" : " -both";
 	
-	# 個々の配列データを保存しておくディレクトリを作成
+	# 個々の配列データを保持しておくディレクトリを作成
 	mkdir("prot") or &exception::error("failed to make directory: prot") if !-d "prot";
 	mkdir("nucl") or &exception::error("failed to make directory: nucl") if !-d "nucl";
+	
+	# 現在の時刻を取得
+	my $timestamp = time;
+	
+	# 変数を宣言
+	my $task = (defined($opt{"b"}) ? "gene prediction" : "homology search and gene prediction");
+	print STDERR "Running $task...";
 	
 	# 相同性検索の出力ファイルを開く (-b指定時)
 	open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}") if $opt{"b"};
@@ -1359,79 +1380,9 @@ sub body {
 	# 相同性検索への入力を閉じる (-b未指定時)
 	close(SEARCH_IN) if !$opt{"b"};
 	
-	# 変数を宣言
-	my %filtered_hits = ();
-	my %blast_hits = ();
-	my $last_query = undef;
-	
-	# 相同性検索の出力を読み込みながら処理
-	print STDERR $opt{"b"} ? "Loading homology search results..." : "Running homology search...";
-	while (my $line = <SEARCH_OUT>) {
-		# コメント行を除外
-		next if $line =~ /^["#"]/;
-		
-		# 改行コードを除去
-		chomp($line);
-		
-		# タブ文字でデータを分割
-		my @col = split(/\t/, $line);
-		
-		# 詳細なサブジェクトを追加
-		$col[12] = $col[1] if !defined($col[12]);
-		
-		# サブジェクト名を編集
-		($col[1]) = split(/\s/, $col[1]);
-		
-		# クエリー名が変わった場合
-		if (!defined($last_query) or $col[0] ne $last_query) {
-			# 条件を満たす各ヒットについてハッシュにデータを登録
-			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {$filtered_hits{$last_query}{$subject} = $blast_hits{$subject};}
-			
-			# ヒットハッシュをリセット
-			%blast_hits = ();
-			
-			# クエリー名を更新
-			$last_query = $col[0];
-		}
-		
-		# 検索結果をヒットハッシュに登録
-		push(@{$blast_hits{$col[1]}}, {"query_start" => $col[6], "query_end" => $col[7], "subject_start" => $col[8], "subject_end" => $col[9], "score" => $col[11], "title" => $col[12]});
-	}
-	
-	# 条件を満たす各ヒットについてハッシュにデータを登録
-	foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {$filtered_hits{$last_query}{$subject} = $blast_hits{$subject};}
-	
-	# 相同性検索の出力を閉じる
-	close(SEARCH_OUT);
-	
-	# 子プロセスが終了するまで待機
-	waitpid($pid, 0);
-	
-	# 子プロセスが異常終了した場合
-	&exception::error("process abnormally exited") if $?;
-	print STDERR "completed\n";
-	
-	# 相同性検索でヒットが得られなかった場合
-	&exception::error("no hits found from $opt{h} search") if !defined($last_query);
-	
-	# 変数を宣言
-	my %loci = ();
-	
 	# 入出力のキューを作成
 	my $input = Thread::Queue->new;
 	my $output = Thread::Queue->new;
-	
-	# 入力キューにデータをバイナリ形式で追加
-	print STDERR "Running gene prediction...";
-	foreach my $query (keys(%filtered_hits)) {
-		foreach my $subject (keys(%{$filtered_hits{$query}})) {
-			$input->enqueue(pack("S/A*S/A*C", $query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$filtered_hits{$query}{$subject}}));
-		}
-	}
-	print STDERR "\rRunning gene prediction...0%";
-	
-	# 変数を宣言
-	my $num_data = $input->pending;
 	
 	# 指定したワーカースレッド数で並列処理
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
@@ -1444,7 +1395,7 @@ sub body {
 			open(REF, "<", $ref_file) or &exception::error("failed to open file: $ref_file");
 			
 			# 入力キューからデータをバイナリ形式で取得して処理
-			while (defined(my $dat = $input->dequeue_nb)) {
+			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
 				my ($query, $subject, $strand) = unpack("S/A*S/A*C", $dat);
 				
@@ -1643,12 +1594,6 @@ sub body {
 				
 				# 出力キューにデータをバイナリ形式で追加
 				$output->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@genes), @genes));
-				
-				# 完了データ数を取得
-				my $fin_data = $output->pending;
-				
-				# 経過を表示
-				print STDERR "\rRunning gene prediction...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
 			}
 			
 			# 参照配列のfastaファイルを閉じる
@@ -1661,6 +1606,75 @@ sub body {
 	}
 	
 	# 変数を宣言
+	my %blast_hits = ();
+	my $last_query = undef;
+	my $num_data = 0;
+	my $fin_data = 0;
+	
+	# 相同性検索の出力を読み込みながら処理
+	while (my $line = <SEARCH_OUT>) {
+		# コメント行を除外
+		next if $line =~ /^["#"]/;
+		
+		# 改行コードを除去
+		chomp($line);
+		
+		# タブ文字でデータを分割
+		my @col = split(/\t/, $line);
+		
+		# 詳細なサブジェクトを追加
+		$col[12] = $col[1] if !defined($col[12]);
+		
+		# サブジェクト名を編集
+		($col[1]) = split(/\s/, $col[1]);
+		
+		# クエリー名が変わった場合
+		if (!defined($last_query) or $col[0] ne $last_query) {
+			# 現在のターゲットファイル数を取得
+			$num_data = grep {$_->uid == $> and $_->mtime >= $timestamp} map {File::stat::stat($_)} glob("nucl/*.fa");
+			
+			# 経過を表示
+			print STDERR "\rRunning $task...", int($fin_data / $num_data * 100), "%" if $num_data and int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
+			
+			# 条件を満たす各ヒットについて処理
+			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
+				# 入力キューにデータをバイナリ形式で追加
+				$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}));
+			}
+			
+			# ヒットハッシュをリセット
+			%blast_hits = ();
+			
+			# クエリー名を更新
+			$last_query = $col[0];
+			
+			# 完了データ数を更新
+			$fin_data++;
+		}
+		
+		# 検索結果をヒットハッシュに登録
+		push(@{$blast_hits{$col[1]}}, {"query_start" => $col[6], "query_end" => $col[7], "subject_start" => $col[8], "subject_end" => $col[9], "score" => $col[11], "title" => $col[12]});
+	}
+	
+	# 条件を満たす残りの各ヒットについて処理
+	foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
+		# 入力キューにデータをバイナリ形式で追加
+		$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}));
+	}
+	
+	# 入力キューにワーカースレッドの数だけ未定義値を追加
+	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
+	
+	# 相同性検索の出力を閉じる
+	close(SEARCH_OUT);
+	
+	# 子プロセスが終了するまで待機
+	waitpid($pid, 0);
+	
+	# 子プロセスが異常終了した場合
+	&exception::error("process abnormally exited") if $?;
+	
+	# 変数を宣言
 	my $fin_threads = 0;
 	
 	# 各ワーカースレッドが終了するまで待機
@@ -1668,24 +1682,23 @@ sub body {
 	
 	# ワーカースレッドが異常終了した場合
 	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
+	print STDERR "\rRunning $task...completed\n";
+	
+	# 相同性検索でヒットが得られなかった場合
+	&exception::error("no hits found from $opt{h} search") if !defined($last_query);
+	
+	# 変数を宣言
+	my %loci = ();
 	
 	# 出力キューからデータをバイナリ形式で取得して処理
-	while (my $dat = $output->dequeue_nb) {
+	print STDERR "Running isoform definition...";
+	while (defined(my $dat = $output->dequeue_nb)) {
 		# データを変換
 		my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
 		
 		# ハッシュにデータをバイナリ形式で登録
 		push(@{$loci{$query}}, @locus) if @locus;
 	}
-	print STDERR "\rRunning gene prediction...completed\n";
-	
-	# 入力キューにアセンブルデータをバイナリ形式で追加
-	print STDERR "Running isoform definition...";
-	foreach my $query (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$loci{$query}}), @{$loci{$query}}));}
-	print STDERR "\rRunning isoform definition...0%";
-	
-	# 変数をリセット
-	$num_data = $input->pending;
 	
 	# 指定したワーカースレッド数で並列処理
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
@@ -1695,7 +1708,7 @@ sub body {
 			threads->set_thread_exit_only(1);
 			
 			# 入力キューからデータをバイナリ形式で取得して処理
-			while (defined(my $dat = $input->dequeue_nb)) {
+			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
 				my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
 				
@@ -1704,12 +1717,6 @@ sub body {
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
 				$output->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$isoforms}), @{$isoforms}));
-				
-				# 完了データ数を取得
-				my $fin_data = $output->pending;
-				
-				# 経過を表示
-				print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
 			}
 			
 			# スレッドを終了
@@ -1717,6 +1724,25 @@ sub body {
 		};
 		## ここまでワーカースレッドの処理 ##
 	}
+	
+	# 変数をリセット
+	$num_data = keys(%loci);
+	$fin_data = 0;
+	
+	# 各クエリーについて処理
+	foreach my $query (keys(%loci)) {
+		# 経過を表示
+		print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
+		
+		# 入力キューにデータをバイナリ形式で追加
+		$input->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$loci{$query}}), @{$loci{$query}}));
+		
+		# 完了データ数を更新
+		$fin_data++;
+	}
+	
+	# 入力キューにワーカースレッドの数だけ未定義値を追加
+	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
 	
 	# 変数をリセット
 	$fin_threads = 0;
@@ -1731,7 +1757,7 @@ sub body {
 	my $gene_id = 0;
 	
 	# 出力キューからデータをバイナリ形式で取得して処理
-	while (my $dat = $output->dequeue_nb) {
+	while (defined(my $dat = $output->dequeue_nb)) {
 		# データを変換
 		my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
 		

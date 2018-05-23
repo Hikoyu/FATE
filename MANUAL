@@ -1,5 +1,5 @@
 ========================================
-Abridged User's Manual of FATE ver.2.0.3
+Abridged User's Manual of FATE ver.2.1.0
 ========================================
 
 Supported Operating System
@@ -48,7 +48,7 @@ $ fate.pl <command> [option] [input] [>output] [2>log]
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.2.0.1
+fate.pl ver.2.1.0
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.
@@ -75,7 +75,7 @@ Usage:
 Options:
   -3 INT 	Length of 3' flanking region <0-> [300]
   -5 INT 	Length of 5' flanking region <0-> [300]
-  -b PATH 	Path to blast output file (TSV format)
+  -b PATH 	Path to the blast output file (TSV format)
   -c FLOAT 	Minimum query coverage to regard as complete CDS <0-1> [0.85]
   -f STR 	Output format <bed|gtf> [bed]
   -g STR 	Gene prediction engine <exonerate|genewise>
@@ -89,6 +89,7 @@ Options:
   -t INT 	Output biotype (+1:functional genes, +2:truncated genes, +4:pseudogenes) <1-7> [7]
   -v INT 	Maximum number of candidate isoforms <1->
   -w		Use 2-byte line feed code (CR+LF) for input files
+  -x		Discard the blast output file
 
 Examples:
 1. Search genome database using nucleotide queries via megablast, then output CDS regions. 
@@ -121,8 +122,8 @@ Usage:
   fate.pl filter [options] <genome.fna> <STDIN|in1.bed> [in2.bed ...] [>out.bed|>out.gtf]
 
 Options:
-  -b PATH 	Path to blast output file (TSV format)
-  -d PATH 	Path to gene/protein database file (FASTA format)
+  -b PATH 	Path to the blast output file (TSV format)
+  -d PATH 	Path to a gene/protein database file (FASTA format)
   -f STR 	Output format <bed|gtf> [bed]
   -h STR 	Homology search engine <blastn|dc-megablast|megablast|blastx|blastx-fast> [blastn]
   -k STR 	Keywords for filtering (AND[&], OR[;], BUT[!])
@@ -132,6 +133,7 @@ Options:
   -t INT 	Output biotype (+1:functional genes, +2:truncated genes, +4:pseudogenes) <1-7> [7]
   -v INT 	Maximum number of candidate isoforms <1->
   -w		Use 2-byte line feed code (CR+LF) for input files
+  -x		Discard the blast output file
 
 Examples:
 1. Search protein database using the sequences of defined loci in the input bed file via blastx, then output the loci which get the hits including 'keyword' in the top 5.
@@ -161,7 +163,7 @@ Usage:
   fate.pl predict [options] <protein.faa> <STDIN|in1.fna> [in2.fna ...] [>out.bed|>out.gtf]
 
 Options:
-  -b PATH 	Path to blast output file (TSV format)
+  -b PATH 	Path to the blast output file (TSV format)
   -c FLOAT 	Minimum query coverage to regard as complete CDS <0-1> [0.85]
   -f STR 	Output format <bed|gtf> [bed]
   -g STR 	Gene prediction engine <exonerate|genewise> [exonerate]
@@ -175,6 +177,7 @@ Options:
   -t INT 	Output biotype (+1:functional genes, +2:truncated genes, +4:pseudogenes) <1-7> [7]
   -v INT 	Maximum number of candidate isoforms <1->
   -w		Use 2-byte line feed code (CR+LF) for input files
+  -x		Discard the blast output file
 
 Examples:
 1. Search protein database using cDNA queries via blastx and perform CDS prediction via exonerate using the hits, then output CDS regions.
