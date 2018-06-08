@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.1.0";	# ソフトウェアのバージョン
+my $version = "ver.2.1.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -320,7 +320,7 @@ sub body {
 			# 配列行の処理
 			$query_seq .= $line =~ /^>/ ? "" : uc($line);
 			
-			# ID行の処理
+			# ID行またはファイル末の処理
 			if ($line =~ /^>/ or eof) {
 				# 配列データを処理
 				if (defined($query_title)) {
@@ -351,6 +351,9 @@ sub body {
 				
 				# ID行の最初の空白文字の前までを配列名として登録
 				($query_title) = split(/\s/, substr($line, 1));
+				
+				# ファイル末の場合は配列名をリセット
+				$query_title = undef if eof;
 				
 				# 配列をリセット
 				$query_seq = "";
@@ -1344,7 +1347,7 @@ sub body {
 			# 配列行の処理
 			$query_seq .= $line =~ /^>/ ? "" : uc($line);
 			
-			# ID行の処理
+			# ID行またはファイル末の処理
 			if ($line =~ /^>/ or eof) {
 				# 配列データを処理
 				if (defined($query_title)) {
@@ -1363,6 +1366,9 @@ sub body {
 				
 				# ID行の最初の空白文字の前までを配列名として登録
 				($query_title) = split(/\s/, substr($line, 1));
+				
+				# ファイル末の場合は配列名をリセット
+				$query_title = undef if eof;
 				
 				# 配列をリセット
 				$query_seq = "";
@@ -1407,7 +1413,7 @@ sub body {
 				
 				# 対象配列ファイルを読み込みながら処理
 				while (my $line = <TARGET>) {
-					# 改行コードを除く
+					# 改行コードを除去
 					chomp($line);
 					
 					# 配列を取得

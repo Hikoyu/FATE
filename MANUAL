@@ -1,5 +1,5 @@
 ========================================
-Abridged User's Manual of FATE ver.2.1.0
+Abridged User's Manual of FATE ver.2.1.1
 ========================================
 
 Supported Operating System
@@ -48,7 +48,7 @@ $ fate.pl <command> [option] [input] [>output] [2>log]
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.2.1.0
+fate.pl ver.2.1.1
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.
