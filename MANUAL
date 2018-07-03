@@ -1,5 +1,5 @@
 ========================================
-Abridged User's Manual of FATE ver.2.1.1
+Abridged User's Manual of FATE ver.2.2.0
 ========================================
 
 Supported Operating System
@@ -48,7 +48,7 @@ $ fate.pl <command> [option] [input] [>output] [2>log]
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.2.1.1
+fate.pl ver.2.2.0
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.
@@ -122,6 +122,7 @@ Usage:
   fate.pl filter [options] <genome.fna> <STDIN|in1.bed> [in2.bed ...] [>out.bed|>out.gtf]
 
 Options:
+  -a PATH 	Path to an annotation table file (TSV format)
   -b PATH 	Path to the blast output file (TSV format)
   -d PATH 	Path to a gene/protein database file (FASTA format)
   -f STR 	Output format <bed|gtf> [bed]
@@ -151,6 +152,9 @@ Note: FATE outputs the results of homology search in customized TSV format (-out
 
 4. Output only functional gene loci in gtf format.
 $ fate.pl filter -f gtf -t 1 genome.fa in.bed >out.gtf
+
+5. Search protein database using the sequences of defined loci in the input bed file via blastx, then output the loci which get the hits including relational keywords in the top 3. Relational keywords are described in the annotation table file in TSV format.
+$ fate.pl filter -a annotation.tsv -d protein.fa -h blastx -r 3 genome.fa in.bed >out.bed
 
 
 [predict]

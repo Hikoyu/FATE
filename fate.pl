@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.1.1";	# ソフトウェアのバージョン
+my $version = "ver.2.2.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -62,7 +62,6 @@ foreach (@option_list) {
 
 ### 編集範囲 開始 ###
 # 追加のモジュールを宣言
-use File::stat;
 use List::Util;
 use IPC::Open2;
 use IO::Pipe;
@@ -127,14 +126,11 @@ sub main {
 	&exception::error("specify INT >= 1: -p $opt{p}") if $opt{"p"} !~ /^\d+$/ or $opt{"p"} < 1;
 	&exception::error("specify INT 1-7: -t $opt{t}") if $opt{"t"} ne "1" and $opt{"t"} ne "2" and $opt{"t"} ne "3" and $opt{"t"} ne "4" and $opt{"t"} ne "5" and $opt{"t"} ne "6" and $opt{"t"} ne "7";
 	&exception::error("specify INT >= 1: -v $opt{v}") if defined($opt{"v"}) and ($opt{"v"} !~ /^\d+$/ or $opt{"v"} < 1);
+	&exception::error("illegal characters exist in the prefix of each locus name: -n $opt{n}") if $opt{"n"} =~ /[^0-9A-Za-z\-_]/;
 	$opt{"v"} = 0 if !defined($opt{"v"});
 	
-	# 相同性検索の出力ファイルを確認 (-b指定時)
-	if (defined($opt{"b"})) {
-		&exception::error("file not found: $opt{b}") if !-f $opt{"b"};
-		&exception::error("file unreadable: $opt{b}") if !-r $opt{"b"};
-		&exception::error("null file specified: $opt{b}") if !-s $opt{"b"};
-	}
+	# 相同性検索の出力ファイルを確認
+	&common::check_files([$opt{"b"}]);
 	### 編集範囲 終了 ###
 	
 	# コマンドの実行 (コマンド指定時)
@@ -238,11 +234,7 @@ sub body {
 	
 	# 入力ファイルを確認
 	&exception::error("input file not specified") if !@ARGV and !-p STDIN;
-	foreach (@ARGV) {
-		&exception::error("file not found: $_") if !-f $_;
-		&exception::error("file unreadable: $_") if !-r $_;
-		&exception::error("null file specified: $_") if !-s $_;
-	}
+	&common::check_files(\@ARGV);
 	
 	# ゲノム配列のfastaファイルを検索
 	&common::find_db($genome_file);
@@ -274,9 +266,6 @@ sub body {
 	# 個々の配列データを保持しておくディレクトリを作成 (-g指定時)
 	mkdir("prot") or &exception::error("failed to make directory: prot") if $opt{"g"} and !-d "prot";
 	mkdir("nucl") or &exception::error("failed to make directory: nucl") if $opt{"g"} and !-d "nucl";
-	
-	# 現在の時刻を取得
-	my $timestamp = time;
 	
 	# 変数を宣言
 	my $task = (defined($opt{"b"}) ? "" : "homology search and ") . ($opt{"g"} ? "gene prediction" : "hit assembly");
@@ -456,6 +445,8 @@ sub body {
 				$target_file = "-t nucl/locus$thread_id.fa" if $opt{"g"} eq "exonerate";
 				$target_file = "nucl/locus$thread_id.fa" if $opt{"g"} eq "genewise";
 				$query_file =~ s/\|/\\\|/g;
+				$query_file =~ s/\(/\\\(/g;
+				$query_file =~ s/\)/\\\)/g;
 				
 				# 遺伝子構造予測を実行
 				open(PREDICT, "-|", "$gene_prediction{$opt{g}} $query_file $target_file 2>/dev/null") or &exception::error("failed to execute gene prediction: $query vs $subject");
@@ -624,8 +615,6 @@ sub body {
 	my $last_subject = "";
 	my $assembly_data = [];
 	my $num_assemblies = 0;
-	my $num_data = 0;
-	my $fin_data = 0;
 	
 	# パイプを開く
 	$report->reader;
@@ -660,12 +649,6 @@ sub body {
 			
 			# クエリー名が変わった場合
 			while (!defined($last_query) or $col[0] ne $last_query) {
-				# 現在のクエリーファイル数を取得 (-g指定時)
-				$num_data = grep {$_->uid == $> and $_->mtime >= $timestamp} map {File::stat::stat($_)} glob("prot/*.fa") if $opt{"g"};
-				
-				# 経過を表示
-				print STDERR "\rRunning $task...", int($fin_data / $num_data * 100), "%" if $num_data and int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
-				
 				# 子プロセスからクエリー名のデータ長をバイナリ形式で受信
 				sysread($report, my $str_len, 2) or &exception::error("query not found in homology search results probably due to inconsistent data order");
 				
@@ -677,9 +660,6 @@ sub body {
 				
 				# クエリー配列長を数値に変換
 				$query_len{$last_query} = unpack("L", $query_len{$last_query});
-				
-				# 完了データ数を更新
-				$fin_data++;
 			}
 			
 			# サブジェクト名を更新
@@ -734,7 +714,7 @@ sub body {
 	
 	# ワーカースレッドが異常終了した場合
 	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
-	print STDERR "\rRunning $task...completed\n";
+	print STDERR "completed\n";
 	
 	# 相同性検索でヒットが得られなかった場合
 	&exception::error("no hits found from $opt{h} search") if !defined($last_query);
@@ -774,21 +754,8 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# 変数をリセット
-	$num_data = keys(%loci);
-	$fin_data = 0;
-	
-	# 各遺伝子座について処理
-	foreach my $subject (keys(%loci)) {
-		# 経過を表示
-		print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
-		
-		# 入力キューにデータをバイナリ形式で追加
-		$input->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}}));
-		
-		# 完了データ数を更新
-		$fin_data++;
-	}
+	# 各遺伝子座について入力キューにデータをバイナリ形式で追加
+	foreach my $subject (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}}));}
 	
 	# 入力キューにワーカースレッドの数だけ未定義値を追加
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
@@ -816,30 +783,33 @@ sub body {
 	
 	# 結果を出力
 	foreach my $subject (sort {&common::faidx_decode($genome_faidx->{$a})->{"id_order"} <=> &common::faidx_decode($genome_faidx->{$b})->{"id_order"}} keys(%loci)) {&common::output($loci{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
-	print STDERR "\rRunning isoform definition...completed\n";
+	print STDERR "completed\n";
 	return(1);
 }
 
 # 相同性検索ヒットのアセンブル search::assemble(相同性検索ヒットリストリファレンス, 最大ヒット間距離, 最大許容クエリー境界オーバーラップ/ギャップ)
 sub assemble {
+	# 引数を取得
+	my ($homology_hits, $max_interval, $max_overlaps) = @_;
+	
 	# 変数を宣言
 	my $assembly_id = 0;
 	
 	# ヒットを領域開始点と領域終了点の順で並べ替え
-	my @sorted_hits = sort {$a->{"locus_start"} <=> $b->{"locus_start"} or $a->{"locus_end"} <=> $b->{"locus_end"}} @{$_[0]};
+	my @sorted_hits = sort {$a->{"locus_start"} <=> $b->{"locus_start"} or $a->{"locus_end"} <=> $b->{"locus_end"}} @{$homology_hits};
 	
 	# 後方のヒットから判定
 	for (my $i = -1;$i >= -@sorted_hits;$i--) {
 		# 連結するヒットを決定
 		for (my $k = $i + 1;$k < 0;$k++) {
 			# 指定値を超える距離のヒットに到達した時点で終了
-			last if $sorted_hits[$k]->{"locus_start"} - $sorted_hits[$i]->{"locus_end"} > $_[1];
+			last if $sorted_hits[$k]->{"locus_start"} - $sorted_hits[$i]->{"locus_end"} > $max_interval;
 			
 			# 方向が異なるヒットを除外
 			next if !($sorted_hits[$k]->{"strand"} + $sorted_hits[$i]->{"strand"});
 			
 			# 指定値を超えるクエリーオーバーラップのヒットを除外
-			next if abs($sorted_hits[$k]->{"query_start"} - $sorted_hits[$i]->{"query_end"}) > $_[2];
+			next if abs($sorted_hits[$k]->{"query_start"} - $sorted_hits[$i]->{"query_end"}) > $max_overlaps;
 			
 			# クエリー開始点が前進しないヒットを除外
 			next if $sorted_hits[$k]->{"query_start"} * $sorted_hits[$k]->{"strand"} <= $sorted_hits[$i]->{"query_start"} * $sorted_hits[$i]->{"strand"};
@@ -892,6 +862,7 @@ package filter;
 sub define {
 	$note = "Filter already annotated protein-coding regions under specified conditions.";
 	$usage = "<genome.fna> <STDIN|in1.bed> [in2.bed ...] [>out.bed|>out.gtf]";
+	$option{"a PATH "} = "Path to an annotation table file (TSV format)";
 	$option{"d PATH "} = "Path to a gene/protein database file (FASTA format)";
 	$option{"h STR "} = "Homology search engine <blastn|dc-megablast|megablast|blastx|blastx-fast> [blastn]";
 	$option{"k STR "} = "Keywords for filtering (AND[&], OR[;], BUT[!])";
@@ -902,7 +873,8 @@ sub define {
 # コマンド本体
 sub body {
 	# 指定されたオプションを確認
-	&exception::error("options incompatible: -b and -d") if $opt{"b"} and $opt{"d"};
+	&exception::error("options incompatible: -a and -k") if defined($opt{"a"}) and defined($opt{"k"});
+	&exception::error("options incompatible: -b and -d") if defined($opt{"b"}) and defined($opt{"d"});
 	&exception::error("unknown engine specified: -h $opt{h}") if $opt{"h"} ne "blastn" and $opt{"h"} ne "dc-megablast" and $opt{"h"} ne "megablast" and $opt{"h"} ne "blastx" and $opt{"h"} ne "blastx-fast";
 	&exception::error("specify INT >= 1: -r $opt{r}") if defined($opt{"r"}) and ($opt{"r"} !~ /^\d+$/ or $opt{"r"} < 1);
 	
@@ -920,11 +892,10 @@ sub body {
 	
 	# 入力ファイルを確認
 	&exception::error("input file not specified") if !@ARGV and !-p STDIN;
-	foreach (@ARGV) {
-		&exception::error("file not found: $_") if !-f $_;
-		&exception::error("file unreadable: $_") if !-r $_;
-		&exception::error("null file specified: $_") if !-s $_;
-	}
+	&common::check_files(\@ARGV);
+	
+	# クエリーアノテーションファイルを読み込む (-a指定時)
+	my $keyword_table = &common::read_relational_table($opt{"a"}, $opt{"w"}) if defined($opt{"a"});
 	
 	# ゲノム配列のfastaファイルを検索
 	&common::find_db($genome_file);
@@ -1083,7 +1054,7 @@ sub body {
 			# クエリー名が変わった場合
 			if (!defined($last_query) or $col[0] ne $last_query) {
 				# 条件を満たす場合はハッシュにデータをバイナリ形式で登録
-				push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if @{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})};
+				push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if @{&common::sift_hits(\%blast_hits, $opt{"r"}, (defined($last_query) and defined($opt{"a"})) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
 				
 				# ヒットハッシュをリセット
 				%blast_hits = ();
@@ -1115,7 +1086,7 @@ sub body {
 		}
 		
 		# 条件を満たす場合はハッシュに残りのデータをバイナリ形式で登録
-		push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if @{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})};
+		push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if @{&common::sift_hits(\%blast_hits, $opt{"r"}, (defined($last_query) and defined($opt{"a"})) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
 		
 		# 相同性検索の出力を閉じる
 		close(SEARCH_OUT);
@@ -1185,21 +1156,8 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# 変数を宣言
-	my $num_data = keys(%loci);
-	my $fin_data = 0;
-	
-	# 各コンティグについて処理
-	foreach my $contig (keys(%loci)) {
-		# 経過を表示
-		print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
-		
-		# 入力キューにデータをバイナリ形式で追加
-		$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}}));
-		
-		# 完了データ数を更新
-		$fin_data++;
-	}
+	# 各コンティグについて入力キューにデータをバイナリ形式で追加
+	foreach my $contig (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}}));}
 	
 	# 入力キューにワーカースレッドの数だけ未定義値を追加
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
@@ -1227,7 +1185,7 @@ sub body {
 	
 	# 結果を出力
 	foreach my $subject (sort {&common::faidx_decode($genome_faidx->{$a})->{"id_order"} <=> &common::faidx_decode($genome_faidx->{$b})->{"id_order"}} keys(%loci)) {&common::output($loci{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
-	print STDERR "\rRunning isoform definition...completed\n";
+	print STDERR "completed\n";
 	return(1);
 }
 
@@ -1271,11 +1229,7 @@ sub body {
 	
 	# 入力ファイルを確認
 	&exception::error("input file not specified") if !@ARGV and !-p STDIN;
-	foreach (@ARGV) {
-		&exception::error("file not found: $_") if !-f $_;
-		&exception::error("file unreadable: $_") if !-r $_;
-		&exception::error("null file specified: $_") if !-s $_;
-	}
+	&common::check_files(\@ARGV);
 	
 	# 参照配列のfastaファイルを検索
 	&common::find_db($ref_file);
@@ -1307,9 +1261,6 @@ sub body {
 	# 個々の配列データを保持しておくディレクトリを作成
 	mkdir("prot") or &exception::error("failed to make directory: prot") if !-d "prot";
 	mkdir("nucl") or &exception::error("failed to make directory: nucl") if !-d "nucl";
-	
-	# 現在の時刻を取得
-	my $timestamp = time;
 	
 	# 変数を宣言
 	my $task = (defined($opt{"b"}) ? "gene prediction" : "homology search and gene prediction");
@@ -1614,8 +1565,6 @@ sub body {
 	# 変数を宣言
 	my %blast_hits = ();
 	my $last_query = undef;
-	my $num_data = 0;
-	my $fin_data = 0;
 	
 	# 相同性検索の出力を読み込みながら処理
 	while (my $line = <SEARCH_OUT>) {
@@ -1636,12 +1585,6 @@ sub body {
 		
 		# クエリー名が変わった場合
 		if (!defined($last_query) or $col[0] ne $last_query) {
-			# 現在のターゲットファイル数を取得
-			$num_data = grep {$_->uid == $> and $_->mtime >= $timestamp} map {File::stat::stat($_)} glob("nucl/*.fa");
-			
-			# 経過を表示
-			print STDERR "\rRunning $task...", int($fin_data / $num_data * 100), "%" if $num_data and int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
-			
 			# 条件を満たす各ヒットについて処理
 			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
 				# 入力キューにデータをバイナリ形式で追加
@@ -1653,9 +1596,6 @@ sub body {
 			
 			# クエリー名を更新
 			$last_query = $col[0];
-			
-			# 完了データ数を更新
-			$fin_data++;
 		}
 		
 		# 検索結果をヒットハッシュに登録
@@ -1688,7 +1628,7 @@ sub body {
 	
 	# ワーカースレッドが異常終了した場合
 	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
-	print STDERR "\rRunning $task...completed\n";
+	print STDERR "completed\n";
 	
 	# 相同性検索でヒットが得られなかった場合
 	&exception::error("no hits found from $opt{h} search") if !defined($last_query);
@@ -1731,21 +1671,8 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# 変数をリセット
-	$num_data = keys(%loci);
-	$fin_data = 0;
-	
-	# 各クエリーについて処理
-	foreach my $query (keys(%loci)) {
-		# 経過を表示
-		print STDERR "\rRunning isoform definition...", int($fin_data / $num_data * 100), "%" if int($fin_data / $num_data * 100) > int(($fin_data - 1) / $num_data * 100);
-		
-		# 入力キューにデータをバイナリ形式で追加
-		$input->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$loci{$query}}), @{$loci{$query}}));
-		
-		# 完了データ数を更新
-		$fin_data++;
-	}
+	# 各クエリーについて入力キューにデータをバイナリ形式で追加
+	foreach my $query (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$loci{$query}}), @{$loci{$query}}));}
 	
 	# 入力キューにワーカースレッドの数だけ未定義値を追加
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
@@ -1773,7 +1700,7 @@ sub body {
 	
 	# 結果を出力
 	foreach my $query (sort {$a cmp $b} keys(%loci)) {&common::output($loci{$query}, $gene_id, $opt{"n"}, $opt{"f"});}
-	print STDERR "\rRunning isoform definition...completed\n";
+	print STDERR "completed\n";
 	return(1);
 }
 
@@ -1782,34 +1709,46 @@ package common;
 
 # キーワード検索 common::keyword_search(検索対象文字列, キーワード)
 sub keyword_search {
+	# 引数を取得
+	my ($target_strings, $key_words) = @_;
+	
 	# キーワード未指定時はNULLを返す
-	return("") if !$_[1];
+	return("") if !$key_words;
 	
 	# 検索を実行して結果を返す
-	return(List::Util::first {!defined(List::Util::first {if (/^!/) {s/^!//;$_[0] =~ /$_/i} else {$_[0] !~ /$_/i}} split(/&/, $_))} split(/;/, $_[1]));
+	return(List::Util::first {!defined(List::Util::first {if (/^!/) {s/^!//;$target_strings =~ /$_/i} else {$target_strings !~ /$_/i}} split(/&/, $_))} split(/;/, $key_words));
 }
 
 # 相補鎖変換 common::complementary(配列)
 sub complementary {
+	# 引数を取得
+	my ($seq) = @_;
+	
 	# 配列を逆順に並べ替える
-	$_[0] = reverse($_[0]);
+	$seq = reverse($seq);
 	
 	# 相補的な塩基に置換
-	$_[0] =~ tr/ATGCRYKMDBVH/TACGYRMKHVBD/;
+	$seq =~ tr/ATGCRYKMDBVH/TACGYRMKHVBD/;
+	
+	# 引数の配列を変更
+	$_[0] = $seq;
 	return(1);
 }
 
 # アミノ酸変換 common::translate(配列, 読み枠)
 sub translate {
+	# 引数を取得
+	my ($seq, $frame) = @_;
+	
 	# 変数を宣言
 	my $aa = "";
 	
 	# 読み枠が負の値の場合は配列を相補鎖変換
-	&common::complementary($_[0]) if $_[1] < 0;
+	&common::complementary($seq) if $frame < 0;
 	
 	# 3塩基ごとにアミノ酸配列に変換
-	for (my $site = abs($_[1]) - ($_[1] < 0);$site < length($_[0]);$site += 3) {
-		my $triplet = substr($_[0], $site, 3);
+	for (my $site = abs($frame) - ($frame < 0);$site < length($seq);$site += 3) {
+		my $triplet = substr($seq, $site, 3);
 		$aa .= exists($codon{$triplet}) ? $codon{$triplet} : "X";
 	}
 	
@@ -1819,124 +1758,192 @@ sub translate {
 
 # 立っているビット数を算出 common::population_count(ビット列)
 sub population_count {
+	# 引数を取得
+	my ($bit_array) = @_;
+	
 	# 変数を宣言
 	my $count = 0;
 	
 	# 64-bitごとに分割統治法で立っているビット数を算出
-	foreach (unpack("Q*", $_[0] . chr(0) x 7)) {
-		$_ = ($_ & 0x5555555555555555) + ($_ >> 1 & 0x5555555555555555);
-		$_ = ($_ & 0x3333333333333333) + ($_ >> 2 & 0x3333333333333333);
-		$_ = ($_ & 0x0F0F0F0F0F0F0F0F) + ($_ >> 4 & 0x0F0F0F0F0F0F0F0F);
-		$_ = ($_ & 0x00FF00FF00FF00FF) + ($_ >> 8 & 0x00FF00FF00FF00FF);
-		$_ = ($_ & 0x0000FFFF0000FFFF) + ($_ >> 16 & 0x0000FFFF0000FFFF);
-		$_ = ($_ & 0x00000000FFFFFFFF) + ($_ >> 32 & 0x00000000FFFFFFFF);
-		$count += $_;
+	foreach my $qword (unpack("Q*", $bit_array . chr(0) x 7)) {
+		$qword = ($qword & 0x5555555555555555) + ($qword >> 1 & 0x5555555555555555);
+		$qword = ($qword & 0x3333333333333333) + ($qword >> 2 & 0x3333333333333333);
+		$qword = ($qword & 0x0F0F0F0F0F0F0F0F) + ($qword >> 4 & 0x0F0F0F0F0F0F0F0F);
+		$qword = ($qword & 0x00FF00FF00FF00FF) + ($qword >> 8 & 0x00FF00FF00FF00FF);
+		$qword = ($qword & 0x0000FFFF0000FFFF) + ($qword >> 16 & 0x0000FFFF0000FFFF);
+		$qword = ($qword & 0x00000000FFFFFFFF) + ($qword >> 32 & 0x00000000FFFFFFFF);
+		$count += $qword;
 	}
 	
 	# 結果を返す
 	return($count);
 }
 
-# データベース検索 common::find_db(ファイル名)
+# データベース検索 common::find_db(ファイルパス)
 sub find_db {
+	# 引数を取得
+	my ($file) = @_;
+	
 	# 環境変数からデータベースパスを取得
 	my @db_list = $ENV{"BLASTDB"} ? map {"$_/"} split(/:/, $ENV{"BLASTDB"}) : ();
 	
 	# ファイルを探索
-	my $prefix = List::Util::first {-f "$_$_[0]"} ("", @db_list);
+	my $prefix = List::Util::first {-f "$_$file"} ("", @db_list);
 	
 	# ファイルが存在しない場合
-	&exception::error("file not found: $_[0]") if !defined($prefix);
-	
-	# ファイルパスを変更
-	$_[0] = "$prefix$_[0]";
+	&exception::error("file not found: $file") if !defined($prefix);
 	
 	# ファイルを確認
-	&exception::error("file unreadable: $_[0]") if !-r $_[0];
-	&exception::error("null file specified: $_[0]") if !-s $_[0];
+	&common::check_files(["$prefix$file"]);
+	
+	# 引数のファイルパスを変更
+	$_[0] = "$prefix$file";
 	return(1);
 }
 
-# BLASTデータベース確認 common::check_blastdb(ファイルパス, 配列型)
+# BLASTデータベース確認 common::check_blastdb(ファイルパス, 配列型フラグ)
 sub check_blastdb {
+	# 引数を取得
+	my ($file, $seq_type_flag) = @_;
+	
 	# 配列型と検索コマンドを定義
-	my ($seq_type, $command) = $_[1] ? ("prot", "blastx") : ("nucl", "blastn");
+	my ($seq_type, $command) = $seq_type_flag ? ("prot", "blastx") : ("nucl", "blastn");
 	
 	# BLASTデータベースファイルを確認
-	return(1) if !system("$command -query /dev/null -db $_[0] >/dev/null 2>&1");
-	&exception::caution("BLAST database file unavailable: $_[0]");
+	return(1) if !system("$command -query /dev/null -db $file >/dev/null 2>&1");
+	&exception::caution("BLAST database file unavailable: $file");
 	
 	# BLASTデータベースファイルを作成
 	print STDERR "Building BLAST database...";
-	&exception::error("failed to build BLAST database") if system("makeblastdb -in $_[0] -dbtype $seq_type 1>/dev/null 2>&1");
+	&exception::error("failed to build BLAST database") if system("makeblastdb -in $file -dbtype $seq_type 1>/dev/null 2>&1");
 	print STDERR "completed\n";
 	return(1);
 }
 
 # 依存関係確認 common::check_dependencies(コマンドリストリファレンス)
 sub check_dependencies {
+	# 引数を取得
+	my ($command_list) = @_;
+	
 	# 変数を宣言
 	my %result = ();
 	
 	# 各コマンドについて処理
-	foreach (@{$_[0]}) {
-		next if !$_;
-		$result{$_} .= `$_ 2>/dev/null`;
-		$result{$_} .= `$_ -version 2>/dev/null`;
+	foreach my $command (@{$command_list}) {
+		next if !$command;
+		$result{$command} .= `$command 2>/dev/null`;
+		$result{$command} .= `$command -version 2>/dev/null`;
 	}
 	
 	# 結果を返す
 	return(\%result);
 }
 
-# bed形式確認 common::check_bed(bedデータリストリファレンス, 領域名プレフィックス)
-sub check_bed {
-	# 3列未満のデータの場合
-	&exception::error("bad format input") if @{$_[0]} < 3;
+# ファイル確認 common::check_files(ファイルリストリファレンス)
+sub check_files {
+	# 引数を取得
+	my ($file_list) = @_;
 	
-	# 4列目が未定義の場合
-	$_[0]->[3] = $_[1] if !defined($_[0]->[3]);
-	
-	# 5列目が未定義の場合
-	$_[0]->[4] = 1000 if !defined($_[0]->[4]);
-	
-	# 6列目が未定義の場合
-	$_[0]->[5] = "+" if !defined($_[0]->[5]);
-	
-	# 7列目が未定義の場合
-	$_[0]->[6] = $_[0]->[1] if !defined($_[0]->[6]);
-	
-	# 8列目が未定義の場合
-	$_[0]->[7] = $_[0]->[2] if !defined($_[0]->[7]);
-	
-	# 9列目が未定義の場合
-	$_[0]->[8] = "." if !defined($_[0]->[8]);
-	
-	# 10列目が未定義の場合
-	$_[0]->[9] = 1 if !defined($_[0]->[9]);
-	
-	# 11列目が未定義の場合
-	$_[0]->[10] = $_[0]->[2] - $_[0]->[1] if !defined($_[0]->[10]);
-	
-	# 12列目が未定義の場合
-	$_[0]->[11] = 0 if !defined($_[0]->[11]);
-	
-	# 11列目をバイナリ形式に変換
-	$_[0]->[10] = pack("L*", split(/,/, $_[0]->[10]));
-	
-	# 12列目をバイナリ形式に変換
-	$_[0]->[11] = pack("L*", split(/,/, $_[0]->[11]));
-	
-	# 10列目の値と11列目および12列目の要素数が一致していない場合
-	&exception::error("bad format input") if $_[0]->[9] != length($_[0]->[10]) / 4 or $_[0]->[9] != length($_[0]->[11]) / 4;
-	
-	# 向きを数字に変換
-	$_[0]->[5] = $_[0]->[5] . "1";
+	# 各ファイルについて処理
+	foreach my $file (@{$file_list}) {
+		next if !$file;
+		&exception::error("file not found: $file") if !-f $file;
+		&exception::error("file unreadable: $file") if !-r $file;
+		&exception::error("null file specified: $file") if !-s $file;
+	}
 	return(1);
 }
 
-# fastaインデックス読み込み common::read_fasta(ファイルパス, 改行コード型)
+# bed形式確認 common::check_bed(bedデータリストリファレンス, 領域名)
+sub check_bed {
+	# 引数を取得
+	my ($bed_data, $locus_name) = @_;
+	
+	# 3列未満のデータの場合
+	&exception::error("bad format input") if @{$bed_data} < 3;
+	
+	# 4列目が未定義の場合
+	$bed_data->[3] = $locus_name if !defined($bed_data->[3]);
+	
+	# 5列目が未定義の場合
+	$bed_data->[4] = 1000 if !defined($bed_data->[4]);
+	
+	# 6列目が未定義の場合
+	$bed_data->[5] = "+" if !defined($bed_data->[5]);
+	
+	# 7列目が未定義の場合
+	$bed_data->[6] = $bed_data->[1] if !defined($bed_data->[6]);
+	
+	# 8列目が未定義の場合
+	$bed_data->[7] = $bed_data->[2] if !defined($bed_data->[7]);
+	
+	# 9列目が未定義の場合
+	$bed_data->[8] = "." if !defined($bed_data->[8]);
+	
+	# 10列目が未定義の場合
+	$bed_data->[9] = 1 if !defined($bed_data->[9]);
+	
+	# 11列目が未定義の場合
+	$bed_data->[10] = $bed_data->[2] - $bed_data->[1] if !defined($bed_data->[10]);
+	
+	# 12列目が未定義の場合
+	$bed_data->[11] = 0 if !defined($bed_data->[11]);
+	
+	# 11列目をバイナリ形式に変換
+	$bed_data->[10] = pack("L*", split(/,/, $bed_data->[10]));
+	
+	# 12列目をバイナリ形式に変換
+	$bed_data->[11] = pack("L*", split(/,/, $bed_data->[11]));
+	
+	# 10列目の値と11列目および12列目の要素数が一致していない場合
+	&exception::error("bad format input") if $bed_data->[9] != length($bed_data->[10]) / 4 or $bed_data->[9] != length($bed_data->[11]) / 4;
+	
+	# 向きを数字に変換
+	$bed_data->[5] = $bed_data->[5] . "1";
+	return(1);
+}
+
+# common::read_relational_table(ファイルパス, 改行コード型フラグ)
+sub read_relational_table {
+	# 引数を取得
+	my ($file, $lfcode_type_flag) = @_;
+	
+	# 変数を宣言
+	my %relational_table = ();
+	
+	# ファイルを確認
+	&common::check_files([$file]);
+	
+	# ファイルを開く
+	open(RELATIONAL_TABLE, "<", $file) or &exception::error("failed to open file: $file");
+	
+	# 入力の改行コードを一時的に変更 (改行コードフラグ指定時)
+	local $/ = "\r\n" if $lfcode_type_flag;
+	
+	# ファイルを読み込みながら処理
+	while (my $line = <RELATIONAL_TABLE>) {
+		# 改行コードを除去
+		chomp($line);
+		
+		# タブ文字でデータを分割
+		my ($key, $value) = split(/\t/, $line);
+		
+		# 対応関係ハッシュにデータを登録
+		$relational_table{$key} = $value;
+	}
+	
+	# ファイルを閉じる
+	close(RELATIONAL_TABLE);
+	
+	# 対応関係ハッシュリファレンスを返す
+	return(\%relational_table);
+}
+
+# fastaインデックス読み込み common::read_fasta(ファイルパス, 改行コード型フラグ)
 sub read_fasta {
+	# 引数を取得
+	my ($file, $lfcode_type_flag) = @_;
+	
 	# 変数を宣言
 	my %fasta_index = ();
 	my $id_key = "";
@@ -1949,14 +1956,14 @@ sub read_fasta {
 	my $file_check = 0;
 	
 	# fastaインデックスファイルを確認
-	$file_check = &exception::caution("index file not found: $_[0].fai") if !$file_check and !-f "$_[0].fai";
-	$file_check = &exception::caution("index file unreadable: $_[0].fai") if !$file_check and !-r "$_[0].fai";
-	$file_check = &exception::caution("null index file specified: $_[0].fai") if !$file_check and !-s "$_[0].fai";
+	$file_check = &exception::caution("fasta index file not found: $file.fai") if !$file_check and !-f "$file.fai";
+	$file_check = &exception::caution("fasta index file unreadable: $file.fai") if !$file_check and !-r "$file.fai";
+	$file_check = &exception::caution("null fasta index file specified: $file.fai") if !$file_check and !-s "$file.fai";
 	
-	# インデックスファイルが存在する場合
+	# fastaインデックスファイルが利用可の場合
 	if (!$file_check) {
 		# fastaインデックスファイルを開く
-		open(FASTA_INDEX, "<", "$_[0].fai") or &exception::error("failed to open index file: $_[0].fai");
+		open(FASTA_INDEX, "<", "$file.fai") or &exception::error("failed to open index file: $file.fai");
 		
 		# データを読み込みながら処理
 		print STDERR "Loading fasta index...";
@@ -1982,19 +1989,19 @@ sub read_fasta {
 		close(FASTA_INDEX);
 	}
 	
-	# インデックスファイルが存在しない場合
+	# fastaインデックスファイルが利用不可の場合
 	else {
 		# 変数を宣言
 		my $error_flag = 0;
 		
 		# fastaファイルを開く
-		open(FASTA, "<", $_[0]) or &exception::error("failed to open file: $_[0]");
+		open(FASTA, "<", $file) or &exception::error("failed to open file: $file");
 		
 		# fastaインデックスファイルを新規作成
-		open(FASTA_INDEX, ">", "$_[0].fai") or &exception::error("failed to build index file: $_[0].fai");
+		open(FASTA_INDEX, ">", "$file.fai") or &exception::error("failed to build index file: $file.fai");
 		
-		# 入力の改行コードを一時的に変更 (-w指定時)
-		local $/ = "\r\n" if $_[1];
+		# 入力の改行コードを一時的に変更 (改行コードフラグ指定時)
+		local $/ = "\r\n" if $lfcode_type_flag;
 		
 		# データを読み込みながら処理
 		print STDERR "Building fasta index...";
@@ -2008,8 +2015,8 @@ sub read_fasta {
 			# 配列行の処理
 			if ($id_key and $line !~ /^>/) {
 				# データの整合性を確認
-				&exception::error("different line length detected: $id_key", $_[0]) if $error_flag == 1;
-				&exception::error("different EOL code detected: $id_key", $_[0]) if $error_flag == 2;
+				&exception::error("different line length detected: $id_key", $file) if $error_flag == 1;
+				&exception::error("different EOL code detected: $id_key", $file) if $error_flag == 2;
 				$error_flag = 1 if $row_width and $row_width != length($line);
 				$error_flag = 2 if $row_bytes and $row_bytes != $row_bytes1;
 				
@@ -2061,13 +2068,16 @@ sub read_fasta {
 	return(\%fasta_index);
 }
 
-# fastaインデックス復号 common::faidx_decode(fastaインデックス)
+# fastaインデックス復号 common::faidx_decode(バイナリfastaインデックス)
 sub faidx_decode {
+	# 引数を取得
+	my ($bin_faidx) = @_;
+	
 	# 変数を宣言
 	my %fasta_index = ();
 	
 	# データを変換してハッシュに登録
-	@fasta_index{("id_order", "id_start", "seq_length", "seq_start", "row_width", "row_bytes")} = unpack("QQLQLL", $_[0]);
+	@fasta_index{("id_order", "id_start", "seq_length", "seq_start", "row_width", "row_bytes")} = unpack("QQLQLL", $bin_faidx);
 	
 	# ハッシュリファレンスを返す
 	return(\%fasta_index);
@@ -2075,11 +2085,14 @@ sub faidx_decode {
 
 # 相同性検索ヒットの選別 common::sift_hits(相同性検索ヒットハッシュリファレンス, ランク閾値, キーワード)
 sub sift_hits {
+	# 引数を取得
+	my ($homology_hits, $cutoff_rank, $key_words) = @_;
+	
 	# 変数を宣言
 	my %score = ();
 	
 	# 各サブジェクトについて処理
-	foreach my $subject (keys(%{$_[0]})) {
+	foreach my $subject (keys(%{$homology_hits})) {
 		# 変数を宣言
 		my $query_array = "";
 		my $target_array = "";
@@ -2087,7 +2100,7 @@ sub sift_hits {
 		my $total_length = 0;
 		
 		# 各ヒットについて処理
-		foreach my $hit (@{$_[0]->{$subject}}) {
+		foreach my $hit (@{$homology_hits->{$subject}}) {
 			for (List::Util::min($hit->{"query_start"}, $hit->{"query_end"})..List::Util::max($hit->{"query_start"}, $hit->{"query_end"})) {vec($query_array, $_, 1) = 1;}
 			for (List::Util::min($hit->{"subject_start"}, $hit->{"subject_end"})..List::Util::max($hit->{"subject_start"}, $hit->{"subject_end"})) {vec($target_array, $_, 1) = 1;}
 			$total_score += $hit->{"score"};
@@ -2102,20 +2115,23 @@ sub sift_hits {
 	my @subjects = sort {$score{$b} <=> $score{$a}} keys(%score);
 	
 	# 指定値より下位のヒットを削除 (ランク閾値指定時)
-	splice(@subjects, $_[1]) if $_[1];
+	splice(@subjects, $cutoff_rank) if $cutoff_rank;
 	
 	# キーワード条件を満たすサブジェクトリストリファレンスを返す
-	return([grep {defined(&common::keyword_search($_[0]->{$_}->[0]->{"title"}, $_[2]))} @subjects]);
+	return([grep {defined(&common::keyword_search($homology_hits->{$_}->[0]->{"title"}, $key_words))} @subjects]);
 }
 
 # アイソフォームを決定 common::define_isoforms(領域データリストリファレンス, 出力アイソフォーム数, 出力遺伝子型)
 sub define_isoforms {
+	# 引数を取得
+	my ($locus_data_list, $num_isoforms, $gene_type) = @_;
+	
 	# 変数を宣言
-	my %type = ("blue" => $_[2] & 0x01, "yellow" => $_[2] & 0x02, "red" => $_[2] & 0x04, "." => 1);
+	my %type = ("blue" => $gene_type & 0x01, "yellow" => $gene_type & 0x02, "red" => $gene_type & 0x04, "." => 1);
 	my @loci = ();
 	
 	# データを順に整理
-	foreach my $locus (map {[unpack($bed12_template, $_)]} @{$_[0]}) {
+	foreach my $locus (map {[unpack($bed12_template, $_)]} @{$locus_data_list}) {
 		# データを変換
 		my @block_size = unpack("L*", $locus->[10]);
 		my @block_start = unpack("L*", $locus->[11]);
@@ -2178,12 +2194,12 @@ sub define_isoforms {
 	# 各領域について処理
 	foreach my $locus (@loci) {
 		# 出力アイソフォーム数が指定されている場合
-		if ($_[1]) {
+		if ($num_isoforms) {
 			# アイソフォームを並べ替える (スコア > 領域長 > 名前)
 			@{$locus->[1]} = sort {$b->[4] <=> $a->[4] or $b->[2] - $b->[1] <=> $a->[2] - $a->[1] or $a->[3] cmp $b->[3]} @{$locus->[1]};
 			
 			# 上位から指定した個数だけ選抜
-			splice(@{$locus->[1]}, $_[1]);
+			splice(@{$locus->[1]}, $num_isoforms);
 			
 			# 領域の位置情報を更新
 			$locus->[0]->[1] = List::Util::min(map {$_->[1]} @{$locus->[1]});
@@ -2204,18 +2220,21 @@ sub define_isoforms {
 	return([map {pack("S/A*LLcL(L/a*)*", @{$_->[0]}, scalar(@{$_->[1]}), @{$_->[1]})} sort {$a->[0]->[1] <=> $b->[0]->[1] or $a->[0]->[2] <=> $b->[0]->[2] or $a->[0]->[3] cmp $b->[0]->[3]} @loci]);
 }
 
-# データを出力 common::output(領域データリスト, 遺伝子ID, プレフィックス, 出力形式)
+# データを出力 common::output(領域データリストリファレンス, 遺伝子ID, プレフィックス, 出力形式)
 sub output {
+	# 引数を取得
+	my ($locus_data_list, $gene_id, $prefix, $output_format) = @_;
+	
 	# 変数を宣言
 	my %type = ("red" => "pseudogene", "yellow" => "truncated", "blue" => "protein_coding", "." => "uncharacterized");
 	
 	# データを出力
-	foreach my $locus (map {[unpack("S/A*LLcL/(L/a*)*", $_)]} @{$_[0]}) {
+	foreach my $locus (map {[unpack("S/A*LLcL/(L/a*)*", $_)]} @{$locus_data_list}) {
 		# 遺伝子IDを更新
-		$_[1]++;
+		$gene_id++;
 		
 		# 遺伝子行を出力 (gtf形式指定時)
-		print "$locus->[0]\tfate\tgene\t", $locus->[1] + 1, "\t$locus->[2]\t.\t", $locus->[3] > 0 ? "+" : "-", "\t.\t", 'gene_id "', "$_[2]$_[1]", '";', "\n" if $_[3] eq "gtf";
+		print "$locus->[0]\tfate\tgene\t", $locus->[1] + 1, "\t$locus->[2]\t.\t", $locus->[3] > 0 ? "+" : "-", "\t.\t", 'gene_id "', "$prefix$gene_id", '";', "\n" if $output_format eq "gtf";
 		
 		# 遺伝子行データを削除
 		splice(@{$locus}, 0, 4);
@@ -2233,14 +2252,14 @@ sub output {
 			$isoform->[11] = [unpack("L*", $isoform->[11])];
 			
 			# bed形式の場合
-			if ($_[3] eq "bed") {
-				$isoform->[3] = "$_[2]$_[1].$isoform_id:" . substr($isoform->[3], index($isoform->[3], ":") + 1);
+			if ($output_format eq "bed") {
+				$isoform->[3] = "$prefix$gene_id.$isoform_id:" . substr($isoform->[3], index($isoform->[3], ":") + 1);
 				$isoform->[5] = $isoform->[5] > 0 ? "+" : "-";
 				print join("\t", @{$isoform}[0..9]), "\t", join(",", @{$isoform->[10]}), "\t", join(",", @{$isoform->[11]}), "\n";
 			}
 			
 			# gtf形式の場合
-			elsif ($_[3] eq "gtf") {
+			elsif ($output_format eq "gtf") {
 				# 開始点をgtf形式に修正
 				$isoform->[1]++;
 				
@@ -2252,22 +2271,25 @@ sub output {
 				$isoform->[5] = $isoform->[5] > 0 ? "+" : "-";
 				
 				# トランスクリプト行を出力
-				print "$isoform->[0]\tfate\ttranscript\t$isoform->[1]\t$isoform->[2]\t$isoform->[4]\t$isoform->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].$isoform_id", '"; transcript_name "', $isoform->[3], '"; transcript_biotype "', $type{$isoform->[8]}, '";', "\n";
+				print "$isoform->[0]\tfate\ttranscript\t$isoform->[1]\t$isoform->[2]\t$isoform->[4]\t$isoform->[5]\t.\t", 'gene_id "', "$prefix$gene_id", '"; transcript_id "', "$prefix$gene_id.$isoform_id", '"; transcript_name "', $isoform->[3], '"; transcript_biotype "', $type{$isoform->[8]}, '";', "\n";
 				
 				# 個々のヒットを示す行を出力
 				for (my $i = 0;$i < $isoform->[9];$i++) {
 					# エキソン行を出力
-					print "$isoform->[0]\tfate\texon\t", $isoform->[1] + $isoform->[11]->[$i], "\t", $isoform->[1] + $isoform->[10]->[$i] + $isoform->[11]->[$i] - 1, "\t.\t$isoform->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].$isoform_id", '"; exon_number "', $i + 1, '"; transcript_name "', $isoform->[3], '"; transcript_biotype "', $type{$isoform->[8]}, '"; exon_id "', "$_[2]$_[1].$isoform_id.", $i + 1, '";', "\n";
+					print "$isoform->[0]\tfate\texon\t", $isoform->[1] + $isoform->[11]->[$i], "\t", $isoform->[1] + $isoform->[10]->[$i] + $isoform->[11]->[$i] - 1, "\t.\t$isoform->[5]\t.\t", 'gene_id "', "$prefix$gene_id", '"; transcript_id "', "$prefix$gene_id.$isoform_id", '"; exon_number "', $i + 1, '"; transcript_name "', $isoform->[3], '"; transcript_biotype "', $type{$isoform->[8]}, '"; exon_id "', "$prefix$gene_id.$isoform_id.", $i + 1, '";', "\n";
 					
 					# コーディング領域以外を除外
 					next if $type{$isoform->[8]} ne "protein_coding";
 					
 					# コーディング領域行を出力
-					print "$isoform->[0]\tfate\tCDS\t", $isoform->[1] + $isoform->[11]->[$i] + 3 * 0 ** ($isoform->[9] - $i + $sign), "\t", $isoform->[1] + $isoform->[10]->[$i] + $isoform->[11]->[$i] - 1 - 3 * 0 ** ($isoform->[9] - $i - $sign), "\t.\t$isoform->[5]\t.\t", 'gene_id "', "$_[2]$_[1]", '"; transcript_id "', "$_[2]$_[1].$isoform_id", '"; exon_number "', $i + 1, '"; transcript_name "', $isoform->[3], '"; transcript_biotype "', $type{$isoform->[8]}, '"; protein_id "', "$_[2]$_[1].$isoform_id", 'p";', "\n";
+					print "$isoform->[0]\tfate\tCDS\t", $isoform->[1] + $isoform->[11]->[$i] + 3 * 0 ** ($isoform->[9] - $i + $sign), "\t", $isoform->[1] + $isoform->[10]->[$i] + $isoform->[11]->[$i] - 1 - 3 * 0 ** ($isoform->[9] - $i - $sign), "\t.\t$isoform->[5]\t.\t", 'gene_id "', "$prefix$gene_id", '"; transcript_id "', "$prefix$gene_id.$isoform_id", '"; exon_number "', $i + 1, '"; transcript_name "', $isoform->[3], '"; transcript_biotype "', $type{$isoform->[8]}, '"; protein_id "', "$prefix$gene_id.$isoform_id", 'p";', "\n";
 				}
 			}
 		}
 	}
+	
+	# 引数の遺伝子IDを変更
+	$_[1] = $gene_id;
 	return(1);
 }
 
