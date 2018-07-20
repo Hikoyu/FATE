@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.2.0";	# ソフトウェアのバージョン
+my $version = "ver.2.2.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -383,7 +383,7 @@ sub body {
 				my ($subject, $locus_start, $locus_end, $query, $query_len, $strand, $mask_block_size, $mask_block_start) = unpack($bed6_mask_template, $dat);
 				
 				# 変数を宣言
-				my $faidx = &common::faidx_decode($genome_faidx->{$subject});
+				my $faidx = &common::decode_faidx($genome_faidx, $subject);
 				
 				# マスクブロックサイズとマスクブロック開始点リストを取得
 				my @mask_block_size = unpack("L*", $mask_block_size);
@@ -782,7 +782,7 @@ sub body {
 	}
 	
 	# 結果を出力
-	foreach my $subject (sort {&common::faidx_decode($genome_faidx->{$a})->{"id_order"} <=> &common::faidx_decode($genome_faidx->{$b})->{"id_order"}} keys(%loci)) {&common::output($loci{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
+	foreach my $subject (sort {&common::decode_faidx($genome_faidx, $a)->{"id_order"} <=> &common::decode_faidx($genome_faidx, $b)->{"id_order"}} keys(%loci)) {&common::output($loci{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
 	print STDERR "completed\n";
 	return(1);
 }
@@ -963,7 +963,7 @@ sub body {
 			my @col = split(/\t/, $line);
 			
 			# 変数を宣言
-			my $faidx = &common::faidx_decode($genome_faidx->{$col[0]});
+			my $faidx = &common::decode_faidx($genome_faidx, $col[0]);
 			
 			# bedデータを確認
 			&common::check_bed(\@col, "$opt{n}$.");
@@ -1184,7 +1184,7 @@ sub body {
 	}
 	
 	# 結果を出力
-	foreach my $subject (sort {&common::faidx_decode($genome_faidx->{$a})->{"id_order"} <=> &common::faidx_decode($genome_faidx->{$b})->{"id_order"}} keys(%loci)) {&common::output($loci{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
+	foreach my $subject (sort {&common::decode_faidx($genome_faidx, $a)->{"id_order"} <=> &common::decode_faidx($genome_faidx, $b)->{"id_order"}} keys(%loci)) {&common::output($loci{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
 	print STDERR "completed\n";
 	return(1);
 }
@@ -1375,7 +1375,7 @@ sub body {
 				close(TARGET);
 				
 				# 変数を宣言
-				my $faidx = &common::faidx_decode($ref_faidx->{$subject});
+				my $faidx = &common::decode_faidx($ref_faidx, $subject);
 				
 				# 参照配列を取得
 				seek(REF, $faidx->{"seq_start"}, 0);
@@ -1945,8 +1945,8 @@ sub read_fasta {
 	my ($file, $lfcode_type_flag) = @_;
 	
 	# 変数を宣言
-	my %fasta_index = ();
-	my $id_key = "";
+	my %faidx = ();
+	my $id_key = undef;
 	my $id_order = 0;
 	my $id_start = 0;
 	my $seq_length = 0;
@@ -1975,7 +1975,7 @@ sub read_fasta {
 			($id_key, $seq_length, $seq_start, $row_width, $row_bytes) = split(/\t/, $line);
 			
 			# インデックスハッシュにデータをバイナリ形式で登録
-			$fasta_index{$id_key} = pack("QQLQLL", $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes);
+			$faidx{$id_key} = pack("QQLQLL", $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes);
 			
 			# ID開始点を更新
 			$id_start = $seq_start + int($seq_length / $row_width) * $row_bytes + $seq_length % $row_width;
@@ -2013,7 +2013,7 @@ sub read_fasta {
 			chomp($line);
 			
 			# 配列行の処理
-			if ($id_key and $line !~ /^>/) {
+			if (defined($id_key) and $line !~ /^>/) {
 				# データの整合性を確認
 				&exception::error("different line length detected: $id_key", $file) if $error_flag == 1;
 				&exception::error("different EOL code detected: $id_key", $file) if $error_flag == 2;
@@ -2028,15 +2028,10 @@ sub read_fasta {
 			
 			# ID行およびファイル末の処理
 			if ($line =~ /^>/ or eof(FASTA)) {
-				if ($id_key) {
-					# インデックスハッシュに直前のデータをバイナリ形式で登録
-					$fasta_index{$id_key} = pack("QQLQLL", $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes);
-					
-					# インデックスファイルに直前のデータを書き込む
-					print FASTA_INDEX "$id_key\t$seq_length\t$seq_start\t$row_width\t$row_bytes\n";
-				}
+				# インデックスハッシュに直前のデータをバイナリ形式で登録し、インデックスファイルに直前のデータを書き込む
+				$faidx{$id_key} = pack("QQLQLL", $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes) and print FASTA_INDEX "$id_key\t$seq_length\t$seq_start\t$row_width\t$row_bytes\n" if defined($id_key);
 				
-				# IDの最初の空白文字の直前までをハッシュキーとして登録
+				# IDの最初の空白文字の直前までをハッシュキーとして取得
 				($id_key) = split(/\s/, substr($line, 1));
 				
 				# 配列開始点を更新
@@ -2065,22 +2060,25 @@ sub read_fasta {
 	}
 	
 	# インデックスハッシュのリファレンスを返す
-	return(\%fasta_index);
+	return(\%faidx);
 }
 
-# fastaインデックス復号 common::faidx_decode(バイナリfastaインデックス)
-sub faidx_decode {
+# fastaインデックス復号 common::decode_faidx(バイナリfastaインデックスハッシュリファレンス, IDハッシュキー)
+sub decode_faidx {
 	# 引数を取得
-	my ($bin_faidx) = @_;
+	my ($bin_faidx, $id_key) = @_;
+	
+	# IDハッシュキーを確認
+	&exception::error("unknown sequence ID key declared: $id_key") if !exists($bin_faidx->{$id_key});
 	
 	# 変数を宣言
-	my %fasta_index = ();
+	my %faidx = ();
 	
 	# データを変換してハッシュに登録
-	@fasta_index{("id_order", "id_start", "seq_length", "seq_start", "row_width", "row_bytes")} = unpack("QQLQLL", $bin_faidx);
+	@faidx{("id_order", "id_start", "seq_length", "seq_start", "row_width", "row_bytes")} = unpack("QQLQLL", $bin_faidx->{$id_key});
 	
 	# ハッシュリファレンスを返す
-	return(\%fasta_index);
+	return(\%faidx);
 }
 
 # 相同性検索ヒットの選別 common::sift_hits(相同性検索ヒットハッシュリファレンス, ランク閾値, キーワード)
