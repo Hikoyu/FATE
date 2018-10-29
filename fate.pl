@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.2.1";	# ソフトウェアのバージョン
+my $version = "ver.2.3.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -27,7 +27,7 @@ my @command_list = sort(keys(%command));
 
 # 指定されたコマンドを確認
 my $specified_command = shift(@ARGV) if @command_list and @ARGV;
-&exception::error("unknown command: $specified_command") if $specified_command and !grep {$_ eq $specified_command} @command_list;
+&exception::error("unknown command: $specified_command") if defined($specified_command) and !exists($command{$specified_command});
 
 # 共通オプションを定義
 my %option;
@@ -66,6 +66,7 @@ use List::Util;
 use IPC::Open2;
 use IO::Pipe;
 use Thread::Queue;
+use threads::shared;
 no warnings 'portable';
 
 # コドンを定義
@@ -124,7 +125,7 @@ sub main {
 	$opt{"f"} = lc($opt{"f"});
 	&exception::error("specify bed or gtf: -f $opt{f}") if $opt{"f"} ne "bed" and $opt{"f"} ne "gtf";
 	&exception::error("specify INT >= 1: -p $opt{p}") if $opt{"p"} !~ /^\d+$/ or $opt{"p"} < 1;
-	&exception::error("specify INT 1-7: -t $opt{t}") if $opt{"t"} ne "1" and $opt{"t"} ne "2" and $opt{"t"} ne "3" and $opt{"t"} ne "4" and $opt{"t"} ne "5" and $opt{"t"} ne "6" and $opt{"t"} ne "7";
+	&exception::error("specify INT 1-7: -t $opt{t}") if $opt{"t"} !~ /^\d+$/ or $opt{"t"} < 1 or $opt{"t"} > 7;
 	&exception::error("specify INT >= 1: -v $opt{v}") if defined($opt{"v"}) and ($opt{"v"} !~ /^\d+$/ or $opt{"v"} < 1);
 	&exception::error("illegal characters exist in the prefix of each locus name: -n $opt{n}") if $opt{"n"} =~ /[^0-9A-Za-z\-_]/;
 	$opt{"v"} = 0 if !defined($opt{"v"});
@@ -363,14 +364,21 @@ sub body {
 	# 相同性検索への入力を閉じる (-b未指定時)
 	close(SEARCH_IN) if !$opt{"b"};
 	
+	# 変数を宣言
+	my @worker_thread = ();
+	
 	# 入出力のキューを作成
 	my $input = Thread::Queue->new;
 	my $output = Thread::Queue->new;
 	
+	# 入出力のキューの要素数上限を定義
+	$input->limit = $opt{"p"};
+	$output->limit = $opt{"p"};
+	
 	# 指定したワーカースレッド数で並列処理 (-g指定時)
 	for (my $thread_id = 0;$opt{"g"} and $thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
-		threads::async {
+		$worker_thread[$thread_id] = threads::async {
 			# ワーカースレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
@@ -607,8 +615,33 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
+	# 共有変数を宣言
+	my %loci : shared;
+	
+	# データストリームのワーカースレッドを作成 (-g指定時)
+	## ここからワーカースレッドの処理 ##
+	$worker_thread[$opt{"p"}] = threads::async {
+		# ワーカースレッドのみを終了可能に変更
+		threads->set_thread_exit_only(1);
+		
+		# 出力キューからデータをバイナリ形式で取得して処理
+		while (defined(my $dat = $output->dequeue)) {
+			# データを変換
+			my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			
+			# キーが未登録の場合はキーと共有配列のリファレンスを登録
+			$loci{$subject} = &threads::shared::share([]) if !exists($loci{$subject});
+			
+			# ハッシュにデータをバイナリ形式で登録
+			push(@{$loci{$subject}}, @locus) if @locus;
+		}
+		
+		# スレッドを終了
+		return(1);
+	} if $opt{"g"};
+	## ここまでワーカースレッドの処理 ##
+	
 	# 変数を宣言
-	my %loci = ();
 	my %query_len = ();
 	my @blast_hits = ();
 	my $last_query = undef;
@@ -639,11 +672,14 @@ sub body {
 			foreach my $locus (@{$assembly_data}) {
 				# 各アセンブリーについて処理
 				foreach my $assembly (values(%{$locus->{"assembly"}})) {
-					# 入力キューにアセンブリーデータをバイナリ形式で追加 (-g指定時)
-					$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if $opt{"g"};
+					# キーが未登録の場合はキーと共有配列のリファレンスを登録 (-g未指定時)
+					$loci{$last_subject} = &threads::shared::share([]) if !$opt{"g"} and !exists($loci{$last_subject});
 					
 					# ハッシュにアセンブリーデータをバイナリ形式で登録 (-g未指定時)
-					push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, ".", scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) if !$opt{"g"};
+					push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, ".", scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
+					
+					# 実行中のワーカースレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
+					$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if threads->list(threads::running) > $opt{"p"};
 				}
 			}
 			
@@ -676,23 +712,23 @@ sub body {
 		$blast_hits[-1]->{"num_connection"} = 0;
 	}
 	
-	# 残りのヒットをアセンブル
+	# ここまでのヒットをアセンブル
 	$assembly_data = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assemblies += scalar(map {keys(%{$_->{"assembly"}})} @{$assembly_data}) if defined($last_query);
 	
 	# 各遺伝子座について処理
 	foreach my $locus (@{$assembly_data}) {
 		# 各アセンブリーについて処理
 		foreach my $assembly (values(%{$locus->{"assembly"}})) {
-			# 入力キューにアセンブリーデータをバイナリ形式で追加 (-g指定時)
-			$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if $opt{"g"};
+			# キーが未登録の場合はキーと共有配列のリファレンスを登録 (-g未指定時)
+			$loci{$last_subject} = &threads::shared::share([]) if !$opt{"g"} and !exists($loci{$last_subject});
 			
 			# ハッシュにアセンブリーデータをバイナリ形式で登録 (-g未指定時)
-			push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, ".", scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) if !$opt{"g"};
+			push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, ".", scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
+			
+			# 実行中のワーカースレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
+			$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if threads->list(threads::running) > $opt{"p"};
 		}
 	}
-	
-	# 入力キューにワーカースレッドの数だけ未定義値を追加 (-g指定時)
-	for (my $thread_id = 0;$opt{"g"} and $thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
 	
 	# パイプを閉じる
 	close($report);
@@ -707,32 +743,40 @@ sub body {
 	&exception::error("process abnormally exited") if $?;
 	
 	# 変数を宣言
-	my $fin_threads = $opt{"g"} ? 0 : $opt{"p"};
+	my $thread_fin_flag = 1;
 	
-	# 各ワーカースレッドが終了するまで待機
-	foreach (threads->list) {$_->join and $fin_threads++;}
+	# 入力キューを終了
+	$input->end;
 	
-	# ワーカースレッドが異常終了した場合
-	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
+	# 並列処理のワーカースレッドが終了するまで待機 (-g指定時)
+	for (my $thread_id = 0;$opt{"g"} and $thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
+	
+	# スレッド完了フラグが立っていない場合
+	&exception::error("worker threads abnormally exited") if !$thread_fin_flag;
+	
+	# 出力キューを終了
+	$output->end;
+	
+	# データストリームのワーカースレッドが終了するまで待機 (-g指定時)
+	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited") if $opt{"g"};
 	print STDERR "completed\n";
 	
 	# 相同性検索でヒットが得られなかった場合
 	&exception::error("no hits found from $opt{h} search") if !defined($last_query);
 	
-	# 出力キューからデータをバイナリ形式で取得して処理
-	print STDERR "Running isoform definition...";
-	while (defined(my $dat = $output->dequeue_nb)) {
-		# データを変換
-		my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
-		
-		# ハッシュにデータをバイナリ形式で登録
-		push(@{$loci{$subject}}, @locus) if @locus;
-	}
+	# 入出力のキューを作成
+	$input = Thread::Queue->new;
+	$output = Thread::Queue->new;
+	
+	# 入出力のキューの要素数上限を定義
+	$input->limit = $opt{"p"};
+	$output->limit = $opt{"p"};
 	
 	# 指定したワーカースレッド数で並列処理
+	print STDERR "Running isoform definition...";
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
-		threads::async {
+		$worker_thread[$thread_id] = threads::async {
 			# ワーカースレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
@@ -754,35 +798,52 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# 各遺伝子座について入力キューにデータをバイナリ形式で追加
-	foreach my $subject (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}}));}
-	
-	# 入力キューにワーカースレッドの数だけ未定義値を追加
-	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
-	
-	# 変数をリセット
-	$fin_threads = 0;
-	
-	# 各ワーカースレッドが終了するまで待機
-	foreach (threads->list) {$_->join and $fin_threads++;}
-	
-	# ワーカースレッドが異常終了した場合
-	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
-	
-	# 変数を宣言
-	my $gene_id = 0;
-	
-	# 出力キューからデータをバイナリ形式で取得して処理
-	while (defined(my $dat = $output->dequeue_nb)) {
-		# データを変換
-		my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+	# データストリームのワーカースレッドを作成
+	## ここからワーカースレッドの処理 ##
+	$worker_thread[$opt{"p"}] = threads::async {
+		# ワーカースレッドのみを終了可能に変更
+		threads->set_thread_exit_only(1);
 		
-		# 領域データリストにデータをバイナリ形式で追加
-		$loci{$subject} = \@locus;
-	}
+		# 変数を宣言
+		my %output_buffer = ();
+		
+		# 出力キューからデータをバイナリ形式で取得して処理
+		while (defined(my $dat = $output->dequeue)) {
+			# データを変換
+			my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			
+			# 結果をバッファに保存
+			$output_buffer{$subject} = \@locus;
+		}
+		
+		# 変数を宣言
+		my $gene_id = 0;
+		
+		# 結果を出力
+		foreach my $subject (sort {&common::decode_faidx($genome_faidx, $a)->{"id_order"} <=> &common::decode_faidx($genome_faidx, $b)->{"id_order"}} keys(%output_buffer)) {&common::output($output_buffer{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
+		
+		# スレッドを終了
+		return(1);
+	};
+	## ここまでワーカースレッドの処理 ##
 	
-	# 結果を出力
-	foreach my $subject (sort {&common::decode_faidx($genome_faidx, $a)->{"id_order"} <=> &common::decode_faidx($genome_faidx, $b)->{"id_order"}} keys(%loci)) {&common::output($loci{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
+	# 各遺伝子座について、実行中のワーカースレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
+	foreach my $subject (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}})) if threads->list(threads::running) > $opt{"p"};}
+	
+	# 入力キューを終了
+	$input->end;
+	
+	# 並列処理のワーカースレッドが終了するまで待機
+	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
+	
+	# スレッド完了フラグが立っていない場合
+	&exception::error("worker threads abnormally exited") if !$thread_fin_flag;
+	
+	# 出力キューを終了
+	$output->end;
+	
+	# データストリームのワーカースレッドが終了するまで待機
+	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited");
 	print STDERR "completed\n";
 	return(1);
 }
@@ -1126,15 +1187,22 @@ sub body {
 	# 相同性検索でヒットが得られなかった場合 (-d指定時)
 	&exception::error("no hits found from $opt{h} search") if $opt{"d"} and !defined($last_query);
 	
+	# 変数を宣言
+	my @worker_thread = ();
+	
 	# 入出力のキューを作成
 	my $input = Thread::Queue->new;
 	my $output = Thread::Queue->new;
+	
+	# 入出力のキューの要素数上限を定義
+	$input->limit = $opt{"p"};
+	$output->limit = $opt{"p"};
 	
 	# 指定したワーカースレッド数で並列処理
 	print STDERR "Running isoform definition...";
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
-		threads::async {
+		$worker_thread[$thread_id] = threads::async {
 			# ワーカースレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
@@ -1156,35 +1224,55 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# 各コンティグについて入力キューにデータをバイナリ形式で追加
+	# データストリームのワーカースレッドを作成
+	## ここからワーカースレッドの処理 ##
+	$worker_thread[$opt{"p"}] = threads::async {
+		# ワーカースレッドのみを終了可能に変更
+		threads->set_thread_exit_only(1);
+		
+		# 変数を宣言
+		my %output_buffer = ();
+		
+		# 出力キューからデータをバイナリ形式で取得して処理
+		while (defined(my $dat = $output->dequeue)) {
+			# データを変換
+			my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			
+			# 結果をバッファに保存
+			$output_buffer{$subject} = \@locus;
+		}
+		
+		# 変数を宣言
+		my $gene_id = 0;
+		
+		# 結果を出力
+		foreach my $subject (sort {&common::decode_faidx($genome_faidx, $a)->{"id_order"} <=> &common::decode_faidx($genome_faidx, $b)->{"id_order"}} keys(%output_buffer)) {&common::output($output_buffer{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
+		
+		# スレッドを終了
+		return(1);
+	};
+	## ここまでワーカースレッドの処理 ##
+	
+	# 各コンティグについて、入力キューにデータをバイナリ形式で追加
 	foreach my $contig (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}}));}
 	
-	# 入力キューにワーカースレッドの数だけ未定義値を追加
-	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
-	
 	# 変数を宣言
-	my $fin_threads = 0;
+	my $thread_fin_flag = 1;
 	
-	# 各ワーカースレッドが終了するまで待機
-	foreach (threads->list) {$_->join and $fin_threads++;}
+	# 入力キューを終了
+	$input->end;
 	
-	# ワーカースレッドが異常終了した場合
-	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
+	# 並列処理のワーカースレッドが終了するまで待機
+	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
 	
-	# 変数を宣言
-	my $gene_id = 0;
+	# スレッド完了フラグが立っていない場合
+	&exception::error("worker threads abnormally exited") if !$thread_fin_flag;
 	
-	# 出力キューからデータをバイナリ形式で取得して処理
-	while (defined(my $dat = $output->dequeue_nb)) {
-		# データを変換
-		my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
-		
-		# 領域データリストにデータをバイナリ形式で追加
-		$loci{$subject} = \@locus;
-	}
+	# 出力キューを終了
+	$output->end;
 	
-	# 結果を出力
-	foreach my $subject (sort {&common::decode_faidx($genome_faidx, $a)->{"id_order"} <=> &common::decode_faidx($genome_faidx, $b)->{"id_order"}} keys(%loci)) {&common::output($loci{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
+	# データストリームのワーカースレッドが終了するまで待機 (-g指定時)
+	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited");
 	print STDERR "completed\n";
 	return(1);
 }
@@ -1337,14 +1425,21 @@ sub body {
 	# 相同性検索への入力を閉じる (-b未指定時)
 	close(SEARCH_IN) if !$opt{"b"};
 	
+	# 変数を宣言
+	my @worker_thread = ();
+	
 	# 入出力のキューを作成
 	my $input = Thread::Queue->new;
 	my $output = Thread::Queue->new;
 	
+	# 入出力のキューの要素数上限を定義
+	$input->limit = $opt{"p"};
+	$output->limit = $opt{"p"};
+	
 	# 指定したワーカースレッド数で並列処理
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
-		threads::async {
+		$worker_thread[$thread_id] = threads::async {
 			# ワーカースレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
@@ -1562,6 +1657,31 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
+	# 共有変数を宣言
+	my %loci : shared;
+	
+	# データストリームのワーカースレッドを作成
+	## ここからワーカースレッドの処理 ##
+	$worker_thread[$opt{"p"}] = threads::async {
+		# ワーカースレッドのみを終了可能に変更
+		threads->set_thread_exit_only(1);
+		
+		# 出力キューからデータをバイナリ形式で取得して処理
+		while (defined(my $dat = $output->dequeue)) {
+			# データを変換
+			my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			
+			# キーが未登録の場合はキーと共有配列のリファレンスを登録
+			$loci{$query} = &threads::shared::share([]) if !exists($loci{$query});
+			
+			# ハッシュにデータをバイナリ形式で登録
+			push(@{$loci{$query}}, @locus) if @locus;
+		}
+		
+		# スレッドを終了
+		return(1);
+	};
+	
 	# 変数を宣言
 	my %blast_hits = ();
 	my $last_query = undef;
@@ -1608,9 +1728,6 @@ sub body {
 		$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}));
 	}
 	
-	# 入力キューにワーカースレッドの数だけ未定義値を追加
-	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
-	
 	# 相同性検索の出力を閉じる
 	close(SEARCH_OUT);
 	
@@ -1621,35 +1738,40 @@ sub body {
 	&exception::error("process abnormally exited") if $?;
 	
 	# 変数を宣言
-	my $fin_threads = 0;
+	my $thread_fin_flag = 1;
 	
-	# 各ワーカースレッドが終了するまで待機
-	foreach (threads->list) {$_->join and $fin_threads++;}
+	# 入力キューを終了
+	$input->end;
 	
-	# ワーカースレッドが異常終了した場合
-	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
+	# 並列処理のワーカースレッドが終了するまで待機
+	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
+	
+	# スレッド完了フラグが立っていない場合
+	&exception::error("worker threads abnormally exited") if !$thread_fin_flag;
+	
+	# 出力キューを終了
+	$output->end;
+	
+	# データストリームのワーカースレッドが終了するまで待機
+	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited");
 	print STDERR "completed\n";
 	
 	# 相同性検索でヒットが得られなかった場合
 	&exception::error("no hits found from $opt{h} search") if !defined($last_query);
 	
-	# 変数を宣言
-	my %loci = ();
+	# 入出力のキューを作成
+	$input = Thread::Queue->new;
+	$output = Thread::Queue->new;
 	
-	# 出力キューからデータをバイナリ形式で取得して処理
-	print STDERR "Running isoform definition...";
-	while (defined(my $dat = $output->dequeue_nb)) {
-		# データを変換
-		my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
-		
-		# ハッシュにデータをバイナリ形式で登録
-		push(@{$loci{$query}}, @locus) if @locus;
-	}
+	# 入出力のキューの要素数上限を定義
+	$input->limit = $opt{"p"};
+	$output->limit = $opt{"p"};
 	
 	# 指定したワーカースレッド数で並列処理
+	print STDERR "Running isoform definition...";
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
-		threads::async {
+		$worker_thread[$thread_id] = threads::async {
 			# ワーカースレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
@@ -1671,35 +1793,52 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# 各クエリーについて入力キューにデータをバイナリ形式で追加
-	foreach my $query (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$loci{$query}}), @{$loci{$query}}));}
-	
-	# 入力キューにワーカースレッドの数だけ未定義値を追加
-	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$input->enqueue(undef);}
-	
-	# 変数をリセット
-	$fin_threads = 0;
-	
-	# 各ワーカースレッドが終了するまで待機
-	foreach (threads->list) {$_->join and $fin_threads++;}
-	
-	# ワーカースレッドが異常終了した場合
-	&exception::error("thread abnormally exited") if $fin_threads < $opt{"p"};
-	
-	# 変数を宣言
-	my $gene_id = 0;
-	
-	# 出力キューからデータをバイナリ形式で取得して処理
-	while (defined(my $dat = $output->dequeue_nb)) {
-		# データを変換
-		my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+	# データストリームのワーカースレッドを作成
+	## ここからワーカースレッドの処理 ##
+	$worker_thread[$opt{"p"}] = threads::async {
+		# ワーカースレッドのみを終了可能に変更
+		threads->set_thread_exit_only(1);
 		
-		# 領域データリストにデータをバイナリ形式で追加
-		$loci{$query} = \@locus;
-	}
+		# 変数を宣言
+		my %output_buffer = ();
+		
+		# 出力キューからデータをバイナリ形式で取得して処理
+		while (defined(my $dat = $output->dequeue)) {
+			# データを変換
+			my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			
+			# 結果をバッファに保存
+			$output_buffer{$query} = \@locus;
+		}
+		
+		# 変数を宣言
+		my $gene_id = 0;
+		
+		# 結果を出力
+		foreach my $query (sort {$a cmp $b} keys(%output_buffer)) {&common::output($output_buffer{$query}, $gene_id, $opt{"n"}, $opt{"f"});}
+		
+		# スレッドを終了
+		return(1);
+	};
+	## ここまでワーカースレッドの処理 ##
 	
-	# 結果を出力
-	foreach my $query (sort {$a cmp $b} keys(%loci)) {&common::output($loci{$query}, $gene_id, $opt{"n"}, $opt{"f"});}
+	# 各クエリーについて、実行中のワーカースレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
+	foreach my $query (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$loci{$query}}), @{$loci{$query}})) if threads->list(threads::running) > $opt{"p"};}
+	
+	# 入力キューを終了
+	$input->end;
+	
+	# 並列処理のワーカースレッドが終了するまで待機
+	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
+	
+	# スレッド完了フラグが立っていない場合
+	&exception::error("worker threads abnormally exited") if !$thread_fin_flag;
+	
+	# 出力キューを終了
+	$output->end;
+	
+	# データストリームのワーカースレッドが終了するまで待機
+	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited");
 	print STDERR "completed\n";
 	return(1);
 }
