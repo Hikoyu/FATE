@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.3.0";	# ソフトウェアのバージョン
+my $version = "ver.2.4.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -64,10 +64,21 @@ foreach (@option_list) {
 # 追加のモジュールを宣言
 use List::Util;
 use IPC::Open2;
-use IO::Pipe;
 use Thread::Queue;
 use threads::shared;
 no warnings 'portable';
+
+# 遺伝子型のカラーコードを定義
+use constant functional => 0x0000FF;
+use constant truncated => 0xFFFF00;
+use constant pseudogene => 0xFF0000;
+use constant uncharacterized => 0x000000;
+
+# 基本16色のカラーコードを定義
+my %color = (
+	"black" => 0x000000, "maroon" => 0x800000, "green" => 0x008000, "navy" => 0x000080, "olive" => 0x808000, "purple" => 0x800080, "teal" => 0x008080, "gray" => 0x808080,
+	"silver" => 0xC0C0C0, "red" => 0xFF0000, "lime" => 0x00FF00, "blue" => 0x0000FF, "yellow" => 0xFFFF00, "magenta" => 0xFF00FF, "cyan" => 0x00FFFF, "white" => 0xFFFFFF
+);
 
 # コドンを定義
 my %codon = (
@@ -109,7 +120,7 @@ my %codon = (
 
 # 変換テンプレートを定義
 my $bed6_mask_template = "S/A*LLS/A*C/A*cL/a*L/a*";
-my $bed12_template = "S/A*LLS/A*C/A*cLLC/A*LL/a*L/a*";
+my $bed12_template = "S/A*LLS/A*C/A*cLLLLL/a*L/a*";
 
 # 処理を追加
 ### 編集範囲 終了 ###
@@ -268,7 +279,7 @@ sub body {
 	mkdir("prot") or &exception::error("failed to make directory: prot") if $opt{"g"} and !-d "prot";
 	mkdir("nucl") or &exception::error("failed to make directory: nucl") if $opt{"g"} and !-d "nucl";
 	
-	# 変数を宣言
+	# 処理内容を定義
 	my $task = (defined($opt{"b"}) ? "" : "homology search and ") . ($opt{"g"} ? "gene prediction" : "hit assembly");
 	print STDERR "Running $task...";
 	
@@ -278,26 +289,21 @@ sub body {
 	# 相同性検索を実行 (-b未指定時)
 	main::open2(*SEARCH_OUT, *SEARCH_IN, "$homology_search{$opt{h}} 2>/dev/null") or &exception::error("failed to execute homology search") if !$opt{"b"};
 	
-	# プロセス間通信のパイプを作成
-	my $report = IO::Pipe->new;
+	# レポートキューを作成
+	my $report = Thread::Queue->new;
 	
-	# プロセス分岐
-	my $pid = fork;
-	
-	# プロセス分岐に失敗した場合
-	&exception::error("failed to fork process") if !defined($pid);
-	
-	## ここから子プロセスの処理 ##
-	if (!$pid) {
+	# データ入力スレッドを作成
+	## ここからデータ入力スレッドの処理 ##
+	my $data_input_thread = threads::async {
+		# このスレッドのみを終了可能に変更
+		threads->set_thread_exit_only(1);
+		
 		# 相同性検索の出力を閉じる
 		close(SEARCH_OUT);
 		
 		# 変数を宣言
 		my $query_title = undef;
 		my $query_seq = "";
-		
-		# パイプを開く
-		$report->writer;
 		
 		# 入力の改行コードを一時的に変更 (-w指定時)
 		local $/ = "\r\n" if $opt{"w"};
@@ -314,8 +320,8 @@ sub body {
 			if ($line =~ /^>/ or eof) {
 				# 配列データを処理
 				if (defined($query_title)) {
-					# 親プロセスにクエリー名とクエリー配列長をバイナリ形式で送信
-					syswrite($report, pack("S/A*L", $query_title, length($query_seq)));
+					# レポートキューにクエリー名とクエリー配列長をバイナリ形式で追加
+					$report->enqueue(pack("S/A*L", $query_title, length($query_seq)));
 					
 					# クエリー配列をファイルに出力 (-g指定時)
 					if ($opt{"g"}) {
@@ -326,7 +332,7 @@ sub body {
 						$aa_seq =~ s/\*//g;
 						
 						# 出力ファイルを作成
-						open(PROT, ">", "prot/$query_title.fa") or &exception::error("failed to make file: prot/$query_title.fa");
+						open(PROT, ">", "prot/" . substr($query_title, 0, index($query_title, ":")) . ".fa") or &exception::error("failed to make file: prot/$query_title.fa");
 						
 						# クエリー配列をfasta形式でファイルに出力
 						print PROT ">$query_title\n$aa_seq\n";
@@ -350,22 +356,19 @@ sub body {
 			}
 		}
 		
-		# パイプを閉じる
-		close($report);
+		# レポートキューを終了
+		$report->end;
 		
 		# 相同性検索への入力を閉じる (-b未指定時)
 		close(SEARCH_IN) if !$opt{"b"};
 		
-		# プロセスを終了
-		exit(0);
-	}
-	## ここまで子プロセスの処理 ##
-	
+		# スレッドを終了
+		return(1);
+	};
+	## ここまでデータ入力スレッドの処理 ##
+
 	# 相同性検索への入力を閉じる (-b未指定時)
 	close(SEARCH_IN) if !$opt{"b"};
-	
-	# 変数を宣言
-	my @worker_thread = ();
 	
 	# 入出力のキューを作成
 	my $input = Thread::Queue->new;
@@ -375,11 +378,15 @@ sub body {
 	$input->limit = $opt{"p"};
 	$output->limit = $opt{"p"};
 	
+	# ワーカースレッド管理の変数を宣言
+	my @worker_thread = ();
+	my $thread_fin_flag = 1;
+	
 	# 指定したワーカースレッド数で並列処理 (-g指定時)
 	for (my $thread_id = 0;$opt{"g"} and $thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
 		$worker_thread[$thread_id] = threads::async {
-			# ワーカースレッドのみを終了可能に変更
+			# このスレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
 			# ゲノム配列のfastaファイルを開く
@@ -448,13 +455,10 @@ sub body {
 				my $summary_flag = 0;
 				
 				# 遺伝子構造予測の引数を定義
-				$query_file = "-q prot/$query.fa" if $opt{"g"} eq "exonerate";
-				$query_file = "prot/$query.fa" if $opt{"g"} eq "genewise";
+				$query_file = "-q prot/" . substr($query, 0, index($query, ":")) . ".fa" if $opt{"g"} eq "exonerate";
+				$query_file = "prot/" . substr($query, 0, index($query, ":")) . ".fa" if $opt{"g"} eq "genewise";
 				$target_file = "-t nucl/locus$thread_id.fa" if $opt{"g"} eq "exonerate";
 				$target_file = "nucl/locus$thread_id.fa" if $opt{"g"} eq "genewise";
-				$query_file =~ s/\|/\\\|/g;
-				$query_file =~ s/\(/\\\(/g;
-				$query_file =~ s/\)/\\\)/g;
 				
 				# 遺伝子構造予測を実行
 				open(PREDICT, "-|", "$gene_prediction{$opt{g}} $query_file $target_file 2>/dev/null") or &exception::error("failed to execute gene prediction: $query vs $subject");
@@ -487,8 +491,7 @@ sub body {
 					
 					# similarity行の処理 (-g exonerate指定時)
 					my @query_block = map {[split(/\s/)]} grep {/^Align/} split(/ ; /, $col[8]) if $opt{"g"} eq "exonerate" and $col[2] eq "similarity";
-					$genes[-1]->[12] = List::Util::min(map {($_->[2] - 1) * 3} @query_block) if @query_block;
-					$genes[-1]->[13] = List::Util::max(map {($_->[2] - 1) * 3 + $_->[3]} @query_block) if @query_block;
+					($genes[-1]->[12], $genes[-1]->[13]) = (List::Util::min(map {($_->[2] - 1) * 3} @query_block), List::Util::max(map {($_->[2] - 1) * 3 + $_->[3]} @query_block)) if @query_block;
 				}
 				
 				# 遺伝子構造予測を終了
@@ -575,19 +578,19 @@ sub body {
 					my $aa = &common::translate($cds, 0);
 					
 					# フレームシフトが存在する場合 (偽遺伝子)
-					if (List::Util::sum(@{$gene->[10]}) % 3 > 0) {$gene->[8] = "red";}
+					if (List::Util::sum(@{$gene->[10]}) % 3 > 0) {$gene->[8] = main::pseudogene;}
 					
 					# 終止コドンが末尾以外に存在する場合 (偽遺伝子)
-					elsif (index($aa, "*") >= 0 and index($aa, "*") < length($aa) - 1) {$gene->[8] = "red";}
+					elsif (index($aa, "*") >= 0 and index($aa, "*") < length($aa) - 1) {$gene->[8] = main::pseudogene;}
 					
 					# 両末端が完全とみなされない場合 (分断遺伝子または偽遺伝子)
-					elsif ($completeness < 2) {$gene->[8] = $upstream_truncation | $downstream_truncation ? "yellow" : "red";}
+					elsif ($completeness < 2) {$gene->[8] = $upstream_truncation | $downstream_truncation ? main::truncated : main::pseudogene;}
 					
 					# 配列長が指定値未満の場合 (偽遺伝子)
-					elsif (List::Util::sum(@{$gene->[10]}) < $opt{"l"}) {$gene->[8] = "red";}
+					elsif (List::Util::sum(@{$gene->[10]}) < $opt{"l"}) {$gene->[8] = main::pseudogene;}
 					
 					# 上記に該当しない場合 (機能遺伝子)
-					else {$gene->[8] = "blue";}
+					else {$gene->[8] = main::functional;}
 					
 					# ゲノム配列の座標でデータを修正
 					($gene->[1], $gene->[2]) = $strand > 0 ? ($modified_locus_start + $gene->[1], $modified_locus_start + $gene->[2]) : ($modified_locus_end - $gene->[2], $modified_locus_end - $gene->[1]);
@@ -618,10 +621,10 @@ sub body {
 	# 共有変数を宣言
 	my %loci : shared;
 	
-	# データストリームのワーカースレッドを作成 (-g指定時)
-	## ここからワーカースレッドの処理 ##
-	$worker_thread[$opt{"p"}] = threads::async {
-		# ワーカースレッドのみを終了可能に変更
+	# データ統合スレッドを作成 (-g指定時)
+	## ここからデータ統合スレッドの処理 ##
+	my $data_merge_thread = threads::async {
+		# このスレッドのみを終了可能に変更
 		threads->set_thread_exit_only(1);
 		
 		# 出力キューからデータをバイナリ形式で取得して処理
@@ -639,7 +642,7 @@ sub body {
 		# スレッドを終了
 		return(1);
 	} if $opt{"g"};
-	## ここまでワーカースレッドの処理 ##
+	## ここまでデータ統合スレッドの処理 ##
 	
 	# 変数を宣言
 	my %query_len = ();
@@ -648,9 +651,6 @@ sub body {
 	my $last_subject = "";
 	my $assembly_data = [];
 	my $num_assemblies = 0;
-	
-	# パイプを開く
-	$report->reader;
 	
 	# 相同性検索の出力を読み込みながら処理
 	while (my $line = <SEARCH_OUT>) {
@@ -676,26 +676,23 @@ sub body {
 					$loci{$last_subject} = &threads::shared::share([]) if !$opt{"g"} and !exists($loci{$last_subject});
 					
 					# ハッシュにアセンブリーデータをバイナリ形式で登録 (-g未指定時)
-					push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, ".", scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
+					push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, 0, scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
 					
-					# 実行中のワーカースレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
+					# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
 					$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if threads->list(threads::running) > $opt{"p"};
 				}
 			}
 			
 			# クエリー名が変わった場合
 			while (!defined($last_query) or $col[0] ne $last_query) {
-				# 子プロセスからクエリー名のデータ長をバイナリ形式で受信
-				sysread($report, my $str_len, 2) or &exception::error("query not found in homology search results probably due to inconsistent data order");
+				# レポートキューからデータをバイナリ形式で受信
+				my $dat = $report->dequeue or &exception::error("query not found in homology search results probably due to inconsistent data order");
 				
-				# 子プロセスからクエリー名を受信
-				sysread($report, $last_query, unpack("S", $str_len));
+				# クエリー名とクエリー配列長を取得
+				my ($query_title, $query_len) = unpack("S/A*L", $dat);
 				
-				# 子プロセスからクエリー配列長をバイナリ形式で受信
-				sysread($report, $query_len{$last_query}, 4);
-				
-				# クエリー配列長を数値に変換
-				$query_len{$last_query} = unpack("L", $query_len{$last_query});
+				# クエリー名とクエリー配列長を保存
+				($last_query, $query_len{$query_title}) = ($query_title, $query_len);
 			}
 			
 			# サブジェクト名を更新
@@ -723,32 +720,23 @@ sub body {
 			$loci{$last_subject} = &threads::shared::share([]) if !$opt{"g"} and !exists($loci{$last_subject});
 			
 			# ハッシュにアセンブリーデータをバイナリ形式で登録 (-g未指定時)
-			push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, ".", scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
+			push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, 0, scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
 			
-			# 実行中のワーカースレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
+			# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
 			$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if threads->list(threads::running) > $opt{"p"};
 		}
 	}
 	
-	# パイプを閉じる
-	close($report);
-	
 	# 相同性検索の出力を閉じる
 	close(SEARCH_OUT);
 	
-	# 子プロセスが終了するまで待機
-	waitpid($pid, 0);
-	
-	# 子プロセスが異常終了した場合
-	&exception::error("process abnormally exited") if $?;
-	
-	# 変数を宣言
-	my $thread_fin_flag = 1;
+	# データ入力スレッドが終了するまで待機
+	$data_input_thread->join or &exception::error("data input thread abnormally exited");
 	
 	# 入力キューを終了
 	$input->end;
 	
-	# 並列処理のワーカースレッドが終了するまで待機 (-g指定時)
+	# 並列処理の各ワーカースレッドが終了するまで待機 (-g指定時)
 	for (my $thread_id = 0;$opt{"g"} and $thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
 	
 	# スレッド完了フラグが立っていない場合
@@ -757,8 +745,8 @@ sub body {
 	# 出力キューを終了
 	$output->end;
 	
-	# データストリームのワーカースレッドが終了するまで待機 (-g指定時)
-	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited") if $opt{"g"};
+	# データ統合スレッドが終了するまで待機 (-g指定時)
+	$data_merge_thread->join or &exception::error("data merge thread abnormally exited") if $opt{"g"};
 	print STDERR "completed\n";
 	
 	# 相同性検索でヒットが得られなかった場合
@@ -777,7 +765,7 @@ sub body {
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
 		$worker_thread[$thread_id] = threads::async {
-			# ワーカースレッドのみを終了可能に変更
+			# このスレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
 			# 入力キューからデータをバイナリ形式で取得して処理
@@ -798,10 +786,10 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# データストリームのワーカースレッドを作成
-	## ここからワーカースレッドの処理 ##
-	$worker_thread[$opt{"p"}] = threads::async {
-		# ワーカースレッドのみを終了可能に変更
+	# データ統合スレッドを作成
+	## ここからデータ統合スレッドの処理 ##
+	$data_merge_thread = threads::async {
+		# このスレッドのみを終了可能に変更
 		threads->set_thread_exit_only(1);
 		
 		# 変数を宣言
@@ -825,15 +813,15 @@ sub body {
 		# スレッドを終了
 		return(1);
 	};
-	## ここまでワーカースレッドの処理 ##
+	## ここまでデータ統合スレッドの処理 ##
 	
-	# 各遺伝子座について、実行中のワーカースレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
+	# 各遺伝子座について、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
 	foreach my $subject (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
 	
-	# 並列処理のワーカースレッドが終了するまで待機
+	# 並列処理の各ワーカースレッドが終了するまで待機
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
 	
 	# スレッド完了フラグが立っていない場合
@@ -842,8 +830,8 @@ sub body {
 	# 出力キューを終了
 	$output->end;
 	
-	# データストリームのワーカースレッドが終了するまで待機
-	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited");
+	# データ統合スレッドが終了するまで待機
+	$data_merge_thread->join or &exception::error("data merge thread abnormally exited");
 	print STDERR "completed\n";
 	return(1);
 }
@@ -979,7 +967,7 @@ sub body {
 	# オプションの処理を追加
 	foreach (keys(%homology_search)) {$homology_search{$_} .= (!$opt{"x"} and `which tee`) ? " 2>/dev/null | tee fate_filter_$opt{h}.out" : "";}
 	
-	# 変数を宣言
+	# 処理内容を定義
 	my $task = ($opt{"b"} or $opt{"d"}) ? "Running homology search" : "Loading bed data";
 	print STDERR "$task...";
 	
@@ -989,22 +977,17 @@ sub body {
 	# 相同性検索を実行 (-d指定時)
 	main::open2(*SEARCH_OUT, *SEARCH_IN, "$homology_search{$opt{h}} 2>/dev/null") or &exception::error("failed to execute homology search") if $opt{"d"};
 	
-	# プロセス間通信のパイプを作成
-	my $report = IO::Pipe->new;
+	# レポートキューを作成
+	my $report = Thread::Queue->new;
 	
-	# プロセス分岐
-	my $pid = fork;
-	
-	# プロセス分岐に失敗した場合
-	&exception::error("failed to fork process") if !defined($pid);
-	
-	## ここから子プロセスの処理 ##
-	if (!$pid) {
+	# データ入力スレッドを作成
+	## ここからデータ入力スレッドの処理 ##
+	my $data_input_thread = threads::async {
+		# このスレッドのみを終了可能に変更
+		threads->set_thread_exit_only(1);
+		
 		# 相同性検索の出力を閉じる
 		close(SEARCH_OUT);
-		
-		# パイプを開く
-		$report->writer;
 		
 		# ゲノム配列のfastaファイルを開く
 		open(GENOME, "<", $genome_file) or &exception::error("failed to open file: $genome_file");
@@ -1029,8 +1012,8 @@ sub body {
 			# bedデータを確認
 			&common::check_bed(\@col, "$opt{n}$.");
 			
-			# 親プロセスにbedデータをバイナリ形式で送信
-			syswrite($report, pack("L/a*", pack($bed12_template, @col)));
+			# レポートキューにbedデータをバイナリ形式で送信
+			$report->enqueue(pack($bed12_template, @col));
 			
 			# 相同性検索を実行しない場合
 			next if !$opt{"d"};
@@ -1060,22 +1043,22 @@ sub body {
 			&common::complementary($query_seq) if $col[5] < 0;
 			
 			# クエリー配列を相同性検索に入力
-			print SEARCH_IN ">$col[3]\n$query_seq\n";
+			print SEARCH_IN ">$col[3]::$col[0]:$col[1]-$col[2](", $col[5] > 0 ? "+" : "-", ")\n$query_seq\n";
 		}
 		
 		# ゲノム配列のfastaファイルを閉じる
 		close(GENOME);
 		
+		# レポートキューを終了
+		$report->end;
+		
 		# 相同性検索への入力を閉じる (-d指定時)
 		close(SEARCH_IN) if $opt{"d"};
 		
-		# パイプを閉じる
-		close($report);
-		
-		# プロセスを終了
-		exit(0);
-	}
-	## ここまで子プロセスの処理 ##
+		# スレッドを終了
+		return(1);
+	};
+	## ここまでデータ入力スレッドの処理 ##
 	
 	# 相同性検索への入力を閉じる (-d指定時)
 	close(SEARCH_IN) if $opt{"d"};
@@ -1087,9 +1070,6 @@ sub body {
 	my $last_query = undef;
 	my $last_contig = "";
 		
-	# パイプを開く
-	$report->reader;
-	
 	# 相同性検索を利用する場合 (-bまたは-d指定時)
 	if ($opt{"b"} or $opt{"d"}) {
 		# 相同性検索の出力を読み込みながら処理
@@ -1104,7 +1084,7 @@ sub body {
 			my @col = split(/\t/, $line);
 			
 			# クエリー名を編集
-			($col[0]) = split(/::/, $col[0]);
+			($col[0]) = substr($col[0], 0, rindex($col[0], "::"));
 			
 			# 詳細なサブジェクトを追加
 			$col[12] = $col[1] if !defined($col[12]);
@@ -1125,11 +1105,8 @@ sub body {
 				
 				# クエリー名が一致するまで処理
 				while ($bed_data[3] ne $last_query) {
-					# 子プロセスからbedデータのデータ長をバイナリ形式で受信
-					sysread($report, my $str_len, 4) or &exception::error("query not found in bed data probably due to inconsistent data order");
-					
-					# 子プロセスからbedデータをバイナリ形式で受信
-					sysread($report, my $dat, unpack("L", $str_len));
+					# レポートキューからbedデータをバイナリ形式で受信
+					my $dat = $report->dequeue or &exception::error("query not found in bed data probably due to inconsistent data order");
 					
 					# bedデータを変換
 					@bed_data = unpack($bed12_template, $dat);
@@ -1155,14 +1132,8 @@ sub body {
 	
 	# 相同性検索を利用しない場合 (-bまたは-d未指定時)
 	else {
-		# 子プロセスからbedデータをバイナリ形式で受信しながら処理
-		while (1) {
-			# 子プロセスからbedデータのデータ長をバイナリ形式で受信
-			sysread($report, my $str_len, 4) or last;
-			
-			# 子プロセスからbedデータをバイナリ形式で受信
-			sysread($report, my $dat, unpack("L", $str_len));
-			
+		# レポートキューからbedデータをバイナリ形式で受信しながら処理
+		while (defined(my $dat = $report->dequeue)) {
 			# bedデータを変換
 			@bed_data = unpack($bed12_template, $dat);
 			
@@ -1174,21 +1145,12 @@ sub body {
 		}
 	}
 	
-	# パイプを閉じる
-	close($report);
-	
-	# 子プロセスが終了するまで待機
-	waitpid($pid, 0);
-	
-	# 子プロセスが異常終了した場合
-	&exception::error("process abnormally exited") if $?;
+	# データ入力スレッドが終了するまで待機
+	$data_input_thread->join or &exception::error("data input thread abnormally exited");
 	print STDERR "completed\n";
 	
 	# 相同性検索でヒットが得られなかった場合 (-d指定時)
 	&exception::error("no hits found from $opt{h} search") if $opt{"d"} and !defined($last_query);
-	
-	# 変数を宣言
-	my @worker_thread = ();
 	
 	# 入出力のキューを作成
 	my $input = Thread::Queue->new;
@@ -1198,12 +1160,16 @@ sub body {
 	$input->limit = $opt{"p"};
 	$output->limit = $opt{"p"};
 	
+	# ワーカースレッド管理の変数を宣言
+	my @worker_thread = ();
+	my $thread_fin_flag = 1;
+	
 	# 指定したワーカースレッド数で並列処理
 	print STDERR "Running isoform definition...";
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
 		$worker_thread[$thread_id] = threads::async {
-			# ワーカースレッドのみを終了可能に変更
+			# このスレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
 			# 入力キューからデータをバイナリ形式で取得して処理
@@ -1224,10 +1190,10 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# データストリームのワーカースレッドを作成
-	## ここからワーカースレッドの処理 ##
-	$worker_thread[$opt{"p"}] = threads::async {
-		# ワーカースレッドのみを終了可能に変更
+	# データ統合スレッドを作成
+	## ここからデータ統合スレッドの処理 ##
+	my $data_merge_thread = threads::async {
+		# このスレッドのみを終了可能に変更
 		threads->set_thread_exit_only(1);
 		
 		# 変数を宣言
@@ -1251,18 +1217,15 @@ sub body {
 		# スレッドを終了
 		return(1);
 	};
-	## ここまでワーカースレッドの処理 ##
+	## ここまでデータ統合スレッドの処理 ##
 	
 	# 各コンティグについて、入力キューにデータをバイナリ形式で追加
 	foreach my $contig (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}}));}
 	
-	# 変数を宣言
-	my $thread_fin_flag = 1;
-	
 	# 入力キューを終了
 	$input->end;
 	
-	# 並列処理のワーカースレッドが終了するまで待機
+	# 並列処理の各ワーカースレッドが終了するまで待機
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
 	
 	# スレッド完了フラグが立っていない場合
@@ -1271,8 +1234,8 @@ sub body {
 	# 出力キューを終了
 	$output->end;
 	
-	# データストリームのワーカースレッドが終了するまで待機 (-g指定時)
-	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited");
+	# データ統合スレッドが終了するまで待機
+	$data_merge_thread->join or &exception::error("worker threads abnormally exited");
 	print STDERR "completed\n";
 	return(1);
 }
@@ -1350,7 +1313,7 @@ sub body {
 	mkdir("prot") or &exception::error("failed to make directory: prot") if !-d "prot";
 	mkdir("nucl") or &exception::error("failed to make directory: nucl") if !-d "nucl";
 	
-	# 変数を宣言
+	# 処理内容を定義
 	my $task = (defined($opt{"b"}) ? "gene prediction" : "homology search and gene prediction");
 	print STDERR "Running $task...";
 	
@@ -1360,14 +1323,12 @@ sub body {
 	# 相同性検索を実行 (-b未指定時)
 	main::open2(*SEARCH_OUT, *SEARCH_IN, "$homology_search{$opt{h}} 2>/dev/null") or &exception::error("failed to execute homology search") if !$opt{"b"};
 	
-	# プロセス分岐
-	my $pid = fork;
-	
-	# プロセス分岐に失敗した場合
-	&exception::error("failed to fork process") if !defined($pid);
-	
-	## ここから子プロセスの処理 ##
-	if (!$pid) {
+	# データ入力スレッドを作成
+	## ここからデータ入力スレッドの処理 ##
+	my $data_input_thread = threads::async {
+		# このスレッドのみを終了可能に変更
+		threads->set_thread_exit_only(1);
+		
 		# 相同性検索の出力を閉じる
 		close(SEARCH_OUT);
 		
@@ -1417,16 +1378,13 @@ sub body {
 		# 相同性検索への入力を閉じる (-b未指定時)
 		close(SEARCH_IN) if !$opt{"b"};
 		
-		# プロセスを終了
-		exit(0);
-	}
-	## ここまで子プロセスの処理 ##
+		# スレッドを終了
+		return(1);
+	};
+	## ここまでデータ入力スレッドの処理 ##
 	
 	# 相同性検索への入力を閉じる (-b未指定時)
 	close(SEARCH_IN) if !$opt{"b"};
-	
-	# 変数を宣言
-	my @worker_thread = ();
 	
 	# 入出力のキューを作成
 	my $input = Thread::Queue->new;
@@ -1436,11 +1394,15 @@ sub body {
 	$input->limit = $opt{"p"};
 	$output->limit = $opt{"p"};
 	
+	# ワーカースレッド管理の変数を宣言
+	my @worker_thread = ();
+	my $thread_fin_flag = 1;
+	
 	# 指定したワーカースレッド数で並列処理
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
 		$worker_thread[$thread_id] = threads::async {
-			# ワーカースレッドのみを終了可能に変更
+			# このスレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
 			# 参照配列のfastaファイルを開く
@@ -1622,19 +1584,19 @@ sub body {
 					my $aa = &common::translate($cds, -$sign);
 					
 					# フレームシフトが存在する場合 (偽遺伝子)
-					if (List::Util::sum(@{$gene->[10]}) % 3 > 0) {$gene->[8] = "red";}
+					if (List::Util::sum(@{$gene->[10]}) % 3 > 0) {$gene->[8] = main::pseudogene;}
 					
 					# 終止コドンが末尾以外に存在する場合 (偽遺伝子)
-					elsif (index($aa, "*") >= 0 and index($aa, "*") < length($aa) - 1) {$gene->[8] = "red";}
+					elsif (index($aa, "*") >= 0 and index($aa, "*") < length($aa) - 1) {$gene->[8] = main::pseudogene;}
 					
 					# 両末端が完全とみなされない場合 (偽遺伝子)
-					elsif ($completeness < 2) {$gene->[8] = "red";}
+					elsif ($completeness < 2) {$gene->[8] = main::pseudogene;}
 					
 					# 配列長が指定値未満の場合 (偽遺伝子)
-					elsif (List::Util::sum(@{$gene->[10]}) < $opt{"l"}) {$gene->[8] = "red";}
+					elsif (List::Util::sum(@{$gene->[10]}) < $opt{"l"}) {$gene->[8] = main::pseudogene;}
 					
 					# 上記に該当しない場合 (機能遺伝子)
-					else {$gene->[8] = "blue";}
+					else {$gene->[8] = main::functional;}
 					
 					# データを修正
 					$gene->[5] .= 1;
@@ -1660,10 +1622,10 @@ sub body {
 	# 共有変数を宣言
 	my %loci : shared;
 	
-	# データストリームのワーカースレッドを作成
-	## ここからワーカースレッドの処理 ##
-	$worker_thread[$opt{"p"}] = threads::async {
-		# ワーカースレッドのみを終了可能に変更
+	# データ統合スレッドを作成
+	## ここからデータ統合スレッドの処理 ##
+	my $data_merge_thread = threads::async {
+		# このスレッドのみを終了可能に変更
 		threads->set_thread_exit_only(1);
 		
 		# 出力キューからデータをバイナリ形式で取得して処理
@@ -1681,6 +1643,7 @@ sub body {
 		# スレッドを終了
 		return(1);
 	};
+	## ここまでデータ統合スレッドの処理 ##
 	
 	# 変数を宣言
 	my %blast_hits = ();
@@ -1731,19 +1694,13 @@ sub body {
 	# 相同性検索の出力を閉じる
 	close(SEARCH_OUT);
 	
-	# 子プロセスが終了するまで待機
-	waitpid($pid, 0);
-	
-	# 子プロセスが異常終了した場合
-	&exception::error("process abnormally exited") if $?;
-	
-	# 変数を宣言
-	my $thread_fin_flag = 1;
+	# データ入力スレッドが終了するまで待機
+	$data_input_thread->join or &exception::error("data input thread abnormally exited");
 	
 	# 入力キューを終了
 	$input->end;
 	
-	# 並列処理のワーカースレッドが終了するまで待機
+	# 並列処理の各ワーカースレッドが終了するまで待機
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
 	
 	# スレッド完了フラグが立っていない場合
@@ -1752,8 +1709,8 @@ sub body {
 	# 出力キューを終了
 	$output->end;
 	
-	# データストリームのワーカースレッドが終了するまで待機
-	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited");
+	# データ統合スレッドが終了するまで待機
+	$data_merge_thread->join or &exception::error("data merge thread abnormally exited");
 	print STDERR "completed\n";
 	
 	# 相同性検索でヒットが得られなかった場合
@@ -1772,7 +1729,7 @@ sub body {
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
 		$worker_thread[$thread_id] = threads::async {
-			# ワーカースレッドのみを終了可能に変更
+			# このスレッドのみを終了可能に変更
 			threads->set_thread_exit_only(1);
 			
 			# 入力キューからデータをバイナリ形式で取得して処理
@@ -1793,10 +1750,10 @@ sub body {
 		## ここまでワーカースレッドの処理 ##
 	}
 	
-	# データストリームのワーカースレッドを作成
-	## ここからワーカースレッドの処理 ##
-	$worker_thread[$opt{"p"}] = threads::async {
-		# ワーカースレッドのみを終了可能に変更
+	# データ統合スレッドを作成
+	## ここからデータ統合スレッドの処理 ##
+	$data_merge_thread = threads::async {
+		# このスレッドのみを終了可能に変更
 		threads->set_thread_exit_only(1);
 		
 		# 変数を宣言
@@ -1820,15 +1777,15 @@ sub body {
 		# スレッドを終了
 		return(1);
 	};
-	## ここまでワーカースレッドの処理 ##
+	## ここまでデータ統合スレッドの処理 ##
 	
-	# 各クエリーについて、実行中のワーカースレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
+	# 各クエリーについて、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
 	foreach my $query (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$loci{$query}}), @{$loci{$query}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
 	
-	# 並列処理のワーカースレッドが終了するまで待機
+	# 並列処理の各ワーカースレッドが終了するまで待機
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {$thread_fin_flag = $worker_thread[$thread_id]->join if $thread_fin_flag;}
 	
 	# スレッド完了フラグが立っていない場合
@@ -1837,8 +1794,8 @@ sub body {
 	# 出力キューを終了
 	$output->end;
 	
-	# データストリームのワーカースレッドが終了するまで待機
-	$worker_thread[$opt{"p"}]->join or &exception::error("worker threads abnormally exited");
+	# データ統合スレッドが終了するまで待機
+	$data_merge_thread->join or &exception::error("data merge thread abnormally exited");
 	print STDERR "completed\n";
 	return(1);
 }
@@ -2017,7 +1974,13 @@ sub check_bed {
 	$bed_data->[7] = $bed_data->[2] if !defined($bed_data->[7]);
 	
 	# 9列目が未定義の場合
-	$bed_data->[8] = "." if !defined($bed_data->[8]);
+	$bed_data->[8] = 0 if !defined($bed_data->[8]);
+	
+	# 9列目がRGB値の場合
+	$bed_data->[8] = vec(chr(0) . join("", map {chr($_)} split(/,/, $bed_data->[8])), 0, 32) if $bed_data->[8] =~ /^(?:\d|\d\d|1\d\d|2[0-4]\d|25[0-5]),(?:\d|\d\d|1\d\d|2[0-4]\d|25[0-5]),(?:\d|\d\d|1\d\d|2[0-4]\d|25[0-5])$/;
+	
+	# 9列目が数字以外の文字を含む場合
+	$bed_data->[8] = exists($color{$bed_data->[8]}) ? $color{$bed_data->[8]} : 0 if $bed_data->[8] =~ /\D/;
 	
 	# 10列目が未定義の場合
 	$bed_data->[9] = 1 if !defined($bed_data->[9]);
@@ -2264,7 +2227,7 @@ sub define_isoforms {
 	my ($locus_data_list, $num_isoforms, $gene_type) = @_;
 	
 	# 変数を宣言
-	my %type = ("blue" => $gene_type & 0x01, "yellow" => $gene_type & 0x02, "red" => $gene_type & 0x04, "." => 1);
+	my %type = (main::functional => $gene_type & 0x01, main::truncated => $gene_type & 0x02, main::pseudogene => $gene_type & 0x04, main::uncharacterized => 0x07);
 	my @loci = ();
 	
 	# データを順に整理
@@ -2363,7 +2326,7 @@ sub output {
 	my ($locus_data_list, $gene_id, $prefix, $output_format) = @_;
 	
 	# 変数を宣言
-	my %type = ("red" => "pseudogene", "yellow" => "truncated", "blue" => "protein_coding", "." => "uncharacterized");
+	my %type = (main::functional => "protein_coding", main::truncated => "truncated", main::pseudogene => "pseudogene", main::uncharacterized => "uncharacterized");
 	
 	# データを出力
 	foreach my $locus (map {[unpack("S/A*LLcL/(L/a*)*", $_)]} @{$locus_data_list}) {
@@ -2392,6 +2355,7 @@ sub output {
 			if ($output_format eq "bed") {
 				$isoform->[3] = "$prefix$gene_id.$isoform_id:" . substr($isoform->[3], index($isoform->[3], ":") + 1);
 				$isoform->[5] = $isoform->[5] > 0 ? "+" : "-";
+				$isoform->[8] = join(",", ($isoform->[8] >> 16 & 0xFF, $isoform->[8] >> 8 & 0xFF, $isoform->[8] & 0xFF));
 				print join("\t", @{$isoform}[0..9]), "\t", join(",", @{$isoform->[10]}), "\t", join(",", @{$isoform->[11]}), "\n";
 			}
 			
