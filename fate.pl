@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.4.1";	# ソフトウェアのバージョン
+my $version = "ver.2.4.2";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -459,6 +459,9 @@ sub body {
 				$query_file = "prot/" . substr($query, 0, index($query, ":")) . ".fa" if $opt{"g"} eq "genewise";
 				$target_file = "-t nucl/locus$thread_id.fa" if $opt{"g"} eq "exonerate";
 				$target_file = "nucl/locus$thread_id.fa" if $opt{"g"} eq "genewise";
+				$query_file =~ s/\|/\\\|/g;
+				$query_file =~ s/\(/\\\(/g;
+				$query_file =~ s/\)/\\\)/g;
 				
 				# 遺伝子構造予測を実行
 				open(PREDICT, "-|", "$gene_prediction{$opt{g}} $query_file $target_file 2>/dev/null") or &exception::error("failed to execute gene prediction: $query vs $subject");
