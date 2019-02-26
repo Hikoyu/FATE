@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.4.0";	# ソフトウェアのバージョン
+my $version = "ver.2.4.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -1084,9 +1084,10 @@ sub body {
 			my @col = split(/\t/, $line);
 			
 			# クエリー名を編集
-			($col[0]) = substr($col[0], 0, rindex($col[0], "::"));
+			($col[0]) = split(/\s/, $col[0]);
+			$col[0] = substr($col[0], 0, rindex($col[0], "::"));
 			
-			# 詳細なサブジェクトを追加
+			# 詳細なサブジェクト名を追加
 			$col[12] = $col[1] if !defined($col[12]);
 			
 			# サブジェクト名を編集
@@ -1219,8 +1220,8 @@ sub body {
 	};
 	## ここまでデータ統合スレッドの処理 ##
 	
-	# 各コンティグについて、入力キューにデータをバイナリ形式で追加
-	foreach my $contig (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}}));}
+	# 各コンティグについて、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
+	foreach my $contig (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
@@ -1663,6 +1664,9 @@ sub body {
 		# 詳細なサブジェクトを追加
 		$col[12] = $col[1] if !defined($col[12]);
 		
+		# クエリー名を編集
+		($col[0]) = split(/\s/, $col[0]);
+		
 		# サブジェクト名を編集
 		($col[1]) = split(/\s/, $col[1]);
 		
@@ -1670,8 +1674,8 @@ sub body {
 		if (!defined($last_query) or $col[0] ne $last_query) {
 			# 条件を満たす各ヒットについて処理
 			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
-				# 入力キューにデータをバイナリ形式で追加
-				$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}));
+				# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
+				$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}})) if threads->list(threads::running) > $opt{"p"};
 			}
 			
 			# ヒットハッシュをリセット
@@ -1687,8 +1691,8 @@ sub body {
 	
 	# 条件を満たす残りの各ヒットについて処理
 	foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
-		# 入力キューにデータをバイナリ形式で追加
-		$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}));
+		# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
+		$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}})) if threads->list(threads::running) > $opt{"p"};
 	}
 	
 	# 相同性検索の出力を閉じる
@@ -2133,7 +2137,7 @@ sub read_fasta {
 				# インデックスハッシュに直前のデータをバイナリ形式で登録し、インデックスファイルに直前のデータを書き込む
 				$faidx{$id_key} = pack("QQLQLL", $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes) and print FASTA_INDEX "$id_key\t$seq_length\t$seq_start\t$row_width\t$row_bytes\n" if defined($id_key);
 				
-				# IDの最初の空白文字の直前までをハッシュキーとして取得
+				# IDの最初の空白文字の前までをハッシュキーとして取得
 				($id_key) = split(/\s/, substr($line, 1));
 				
 				# 配列開始点を更新
