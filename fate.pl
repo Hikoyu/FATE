@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.4.2";	# ソフトウェアのバージョン
+my $version = "ver.2.5.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -118,9 +118,13 @@ my %codon = (
 	"MGA" => "R", "MGG" => "R", "MGR" => "R"
 );
 
-# 変換テンプレートを定義
-my $bed6_mask_template = "S/A*LLS/A*C/A*cL/a*L/a*";
+# データ変換テンプレートを定義
+my $bed6_mask_template = "S/A*LLS/A*C/A*cL/a*L/a*a36";
 my $bed12_template = "S/A*LLS/A*C/A*cLLLLL/a*L/a*";
+my $query_subject_template = "S/A*S/A*Ca36";
+my $locus_encode_template = "S/A*L(L/a*)*";
+my $locus_decode_template = "S/A*L/(L/a*)*";
+my $faidx_template = "QQLQLL";
 
 # 処理を追加
 ### 編集範囲 終了 ###
@@ -251,9 +255,6 @@ sub body {
 	# ゲノム配列のfastaファイルを検索
 	&common::find_db($genome_file);
 	
-	# ゲノム配列のfastaインデックスを取得
-	my $genome_faidx = &common::read_fasta($genome_file, $opt{"w"});
-	
 	# ゲノム配列のblastデータベースを確認 (-b未指定時)
 	&common::check_blastdb($genome_file) if !$opt{"b"};
 	
@@ -278,10 +279,6 @@ sub body {
 	# 個々の配列データを保持しておくディレクトリを作成 (-g指定時)
 	mkdir("prot") or &exception::error("failed to make directory: prot") if $opt{"g"} and !-d "prot";
 	mkdir("nucl") or &exception::error("failed to make directory: nucl") if $opt{"g"} and !-d "nucl";
-	
-	# 処理内容を定義
-	my $task = (defined($opt{"b"}) ? "" : "homology search and ") . ($opt{"g"} ? "gene prediction" : "hit assembly");
-	print STDERR "Running $task...";
 	
 	# 相同性検索の出力ファイルを開く (-b指定時)
 	open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}") if $opt{"b"};
@@ -395,10 +392,10 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($subject, $locus_start, $locus_end, $query, $query_len, $strand, $mask_block_size, $mask_block_start) = unpack($bed6_mask_template, $dat);
+				my ($subject, $locus_start, $locus_end, $query, $query_len, $strand, $mask_block_size, $mask_block_start, $bin_faidx) = unpack($bed6_mask_template, $dat);
 				
 				# 変数を宣言
-				my $faidx = &common::decode_faidx($genome_faidx, $subject);
+				my $faidx = &common::decode_faidx($bin_faidx);
 				
 				# マスクブロックサイズとマスクブロック開始点リストを取得
 				my @mask_block_size = unpack("L*", $mask_block_size);
@@ -609,7 +606,7 @@ sub body {
 				}
 				
 				# 出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@genes), @genes));
+				$output->enqueue(pack($locus_encode_template, $subject, scalar(@genes), @genes));
 			}
 			
 			# ゲノム配列のfastaファイルを閉じる
@@ -633,7 +630,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			my ($subject, @locus) = unpack($locus_decode_template, $dat);
 			
 			# キーが未登録の場合はキーと共有配列のリファレンスを登録
 			$loci{$subject} = &threads::shared::share([]) if !exists($loci{$subject});
@@ -647,6 +644,9 @@ sub body {
 	} if $opt{"g"};
 	## ここまでデータ統合スレッドの処理 ##
 	
+	# 共有変数を宣言
+	my %id_order : shared;
+	
 	# 変数を宣言
 	my %query_len = ();
 	my @blast_hits = ();
@@ -654,6 +654,13 @@ sub body {
 	my $last_subject = "";
 	my $assembly_data = [];
 	my $num_assemblies = 0;
+	
+	# ゲノム配列のfastaインデックスを取得
+	my $genome_faidx = &common::read_fasta($genome_file, $opt{"w"});
+	
+	# 処理内容を定義
+	my $task = (defined($opt{"b"}) ? "" : "homology search and ") . ($opt{"g"} ? "gene prediction" : "hit assembly");
+	print STDERR "Running $task...";
 	
 	# 相同性検索の出力を読み込みながら処理
 	while (my $line = <SEARCH_OUT>) {
@@ -682,7 +689,7 @@ sub body {
 					push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, 0, scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
 					
 					# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
-					$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if threads->list(threads::running) > $opt{"p"};
+					$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}), $genome_faidx->{$last_subject})) if threads->list(threads::running) > $opt{"p"};
 				}
 			}
 			
@@ -700,6 +707,9 @@ sub body {
 			
 			# サブジェクト名を更新
 			$last_subject = $col[1];
+			
+			# 未登録の場合はID番号を登録
+			$id_order{$last_subject} = &common::decode_faidx($genome_faidx->{$last_subject})->{"id_order"} if !exists($id_order{$last_subject});
 			
 			# ヒットリストをリセット
 			@blast_hits = ();
@@ -726,12 +736,15 @@ sub body {
 			push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, 0, scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
 			
 			# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
-			$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}))) if threads->list(threads::running) > $opt{"p"};
+			$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}), $genome_faidx->{$last_subject})) if threads->list(threads::running) > $opt{"p"};
 		}
 	}
 	
 	# 相同性検索の出力を閉じる
 	close(SEARCH_OUT);
+	
+	# ゲノム配列のfastaインデックスを破棄
+	undef($genome_faidx);
 	
 	# データ入力スレッドが終了するまで待機
 	$data_input_thread->join or &exception::error("data input thread abnormally exited");
@@ -774,13 +787,13 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+				my ($subject, @locus) = unpack($locus_decode_template, $dat);
 				
 				# アイソフォームを分離
 				my $isoforms = &common::define_isoforms(\@locus, $opt{"v"}, $opt{"t"});
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$isoforms}), @{$isoforms}));
+				$output->enqueue(pack($locus_encode_template, $subject, scalar(@{$isoforms}), @{$isoforms}));
 			}
 			
 			# スレッドを終了
@@ -801,7 +814,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			my ($subject, @locus) = unpack($locus_decode_template, $dat);
 			
 			# 結果をバッファに保存
 			$output_buffer{$subject} = \@locus;
@@ -811,7 +824,7 @@ sub body {
 		my $gene_id = 0;
 		
 		# 結果を出力
-		foreach my $subject (sort {&common::decode_faidx($genome_faidx, $a)->{"id_order"} <=> &common::decode_faidx($genome_faidx, $b)->{"id_order"}} keys(%output_buffer)) {&common::output($output_buffer{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
+		foreach my $subject (sort {$id_order{$a} <=> $id_order{$b}} keys(%output_buffer)) {&common::output($output_buffer{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
 		
 		# スレッドを終了
 		return(1);
@@ -819,7 +832,7 @@ sub body {
 	## ここまでデータ統合スレッドの処理 ##
 	
 	# 各遺伝子座について、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-	foreach my $subject (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}})) if threads->list(threads::running) > $opt{"p"};}
+	foreach my $subject (keys(%loci)) {$input->enqueue(pack($locus_encode_template, $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
@@ -952,9 +965,6 @@ sub body {
 	# ゲノム配列のfastaファイルを検索
 	&common::find_db($genome_file);
 	
-	# ゲノム配列のfastaインデックスを取得
-	my $genome_faidx = &common::read_fasta($genome_file, $opt{"w"});
-	
 	# 参照配列のfastaファイルを検索し、参照配列のblastデータベースを確認 (-d指定時)
 	&common::find_db($opt{"d"}) and &common::check_blastdb($opt{"d"}, $opt{"h"} =~ /^blastx/) if $opt{"d"};
 	
@@ -970,9 +980,8 @@ sub body {
 	# オプションの処理を追加
 	foreach (keys(%homology_search)) {$homology_search{$_} .= (!$opt{"x"} and `which tee`) ? " 2>/dev/null | tee fate_filter_$opt{h}.out" : "";}
 	
-	# 処理内容を定義
-	my $task = ($opt{"b"} or $opt{"d"}) ? "Running homology search" : "Loading bed data";
-	print STDERR "$task...";
+	# 共有変数を宣言
+	my %id_order : shared;
 	
 	# 相同性検索の出力ファイルを開く (-b指定時)
 	open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}") if $opt{"b"};
@@ -992,11 +1001,18 @@ sub body {
 		# 相同性検索の出力を閉じる
 		close(SEARCH_OUT);
 		
+		# ゲノム配列のfastaインデックスを取得
+		my $genome_faidx = &common::read_fasta($genome_file, $opt{"w"});
+		
 		# ゲノム配列のfastaファイルを開く
 		open(GENOME, "<", $genome_file) or &exception::error("failed to open file: $genome_file");
 		
 		# 入力の改行コードを一時的に変更 (-w指定時)
 		local $/ = "\r\n" if $opt{"w"};
+		
+		# 処理内容を定義
+		my $task = ($opt{"b"} or $opt{"d"}) ? "Running homology search" : "Loading bed data";
+		print STDERR "$task...";
 		
 		# bedデータを読み込みながら処理
 		while (my $line = <>) {
@@ -1010,13 +1026,16 @@ sub body {
 			my @col = split(/\t/, $line);
 			
 			# 変数を宣言
-			my $faidx = &common::decode_faidx($genome_faidx, $col[0]);
+			my $faidx = &common::decode_faidx($genome_faidx->{$col[0]});
 			
 			# bedデータを確認
 			&common::check_bed(\@col, "$opt{n}$.");
 			
 			# レポートキューにbedデータをバイナリ形式で送信
 			$report->enqueue(pack($bed12_template, @col));
+			
+			# 未登録の場合はID番号を登録
+			$id_order{$col[0]} = $faidx->{"id_order"} if !exists($id_order{$col[0]});
 			
 			# 相同性検索を実行しない場合
 			next if !$opt{"d"};
@@ -1179,13 +1198,13 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+				my ($subject, @locus) = unpack($locus_decode_template, $dat);
 				
 				# アイソフォームを分離
 				my $isoforms = &common::define_isoforms(\@locus, $opt{"v"}, $opt{"t"});
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack("S/A*L(L/a*)*", $subject, scalar(@{$isoforms}), @{$isoforms}));
+				$output->enqueue(pack($locus_encode_template, $subject, scalar(@{$isoforms}), @{$isoforms}));
 			}
 			
 			# スレッドを終了
@@ -1206,7 +1225,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($subject, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			my ($subject, @locus) = unpack($locus_decode_template, $dat);
 			
 			# 結果をバッファに保存
 			$output_buffer{$subject} = \@locus;
@@ -1216,7 +1235,7 @@ sub body {
 		my $gene_id = 0;
 		
 		# 結果を出力
-		foreach my $subject (sort {&common::decode_faidx($genome_faidx, $a)->{"id_order"} <=> &common::decode_faidx($genome_faidx, $b)->{"id_order"}} keys(%output_buffer)) {&common::output($output_buffer{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
+		foreach my $subject (sort {$id_order{$a} <=> $id_order{$b}} keys(%output_buffer)) {&common::output($output_buffer{$subject}, $gene_id, $opt{"n"}, $opt{"f"});}
 		
 		# スレッドを終了
 		return(1);
@@ -1224,7 +1243,7 @@ sub body {
 	## ここまでデータ統合スレッドの処理 ##
 	
 	# 各コンティグについて、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-	foreach my $contig (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}})) if threads->list(threads::running) > $opt{"p"};}
+	foreach my $contig (keys(%loci)) {$input->enqueue(pack($locus_encode_template, $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
@@ -1289,9 +1308,6 @@ sub body {
 	# 参照配列のfastaファイルを検索
 	&common::find_db($ref_file);
 	
-	# 参照配列のfastaインデックスを取得
-	my $ref_faidx = &common::read_fasta($ref_file, $opt{"w"});
-	
 	# 参照配列のblastデータベースを確認 (-b未指定時)
 	&common::check_blastdb($ref_file, 1) if !$opt{"b"};
 	
@@ -1317,9 +1333,8 @@ sub body {
 	mkdir("prot") or &exception::error("failed to make directory: prot") if !-d "prot";
 	mkdir("nucl") or &exception::error("failed to make directory: nucl") if !-d "nucl";
 	
-	# 処理内容を定義
-	my $task = (defined($opt{"b"}) ? "gene prediction" : "homology search and gene prediction");
-	print STDERR "Running $task...";
+	# 共有変数を宣言
+	my %id_order : shared;
 	
 	# 相同性検索の出力ファイルを開く (-b指定時)
 	open(SEARCH_OUT, "<", $opt{"b"}) or &exception::error("failed to open file: $opt{b}") if $opt{"b"};
@@ -1339,6 +1354,7 @@ sub body {
 		# 変数を宣言
 		my $query_title = undef;
 		my $query_seq = "";
+		my $id_order = 0;
 		
 		# 入力の改行コードを一時的に変更 (-w指定時)
 		local $/ = "\r\n" if $opt{"w"};
@@ -1363,6 +1379,12 @@ sub body {
 					
 					# 出力ファイルを閉じる
 					close(NUCL);
+					
+					# ID番号を登録
+					$id_order{$query_title} = $id_order;
+					
+					# ID番号を加算
+					$id_order++;
 					
 					# クエリー配列を相同性検索に入力 (-b未指定時)
 					print SEARCH_IN ">$query_title\n$query_seq\n" if !$opt{"b"};
@@ -1415,7 +1437,7 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($query, $subject, $strand) = unpack("S/A*S/A*C", $dat);
+				my ($query, $subject, $strand, $bin_faidx) = unpack($query_subject_template, $dat);
 				
 				# 変数を宣言
 				my $target_seq = "";
@@ -1436,7 +1458,7 @@ sub body {
 				close(TARGET);
 				
 				# 変数を宣言
-				my $faidx = &common::decode_faidx($ref_faidx, $subject);
+				my $faidx = &common::decode_faidx($bin_faidx);
 				
 				# 参照配列を取得
 				seek(REF, $faidx->{"seq_start"}, 0);
@@ -1611,7 +1633,7 @@ sub body {
 				}
 				
 				# 出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@genes), @genes));
+				$output->enqueue(pack($locus_encode_template, $query, scalar(@genes), @genes));
 			}
 			
 			# 参照配列のfastaファイルを閉じる
@@ -1635,7 +1657,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			my ($query, @locus) = unpack($locus_decode_template, $dat);
 			
 			# キーが未登録の場合はキーと共有配列のリファレンスを登録
 			$loci{$query} = &threads::shared::share([]) if !exists($loci{$query});
@@ -1652,6 +1674,13 @@ sub body {
 	# 変数を宣言
 	my %blast_hits = ();
 	my $last_query = undef;
+	
+	# 参照配列のfastaインデックスを取得
+	my $ref_faidx = &common::read_fasta($ref_file, $opt{"w"});
+	
+	# 処理内容を定義
+	my $task = (defined($opt{"b"}) ? "gene prediction" : "homology search and gene prediction");
+	print STDERR "Running $task...";
 	
 	# 相同性検索の出力を読み込みながら処理
 	while (my $line = <SEARCH_OUT>) {
@@ -1678,7 +1707,7 @@ sub body {
 			# 条件を満たす各ヒットについて処理
 			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
 				# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-				$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}})) if threads->list(threads::running) > $opt{"p"};
+				$input->enqueue(pack($query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
 			}
 			
 			# ヒットハッシュをリセット
@@ -1695,11 +1724,14 @@ sub body {
 	# 条件を満たす残りの各ヒットについて処理
 	foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
 		# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-		$input->enqueue(pack("S/A*S/A*C", $last_query, $subject, List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}})) if threads->list(threads::running) > $opt{"p"};
+		$input->enqueue(pack($query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
 	}
 	
 	# 相同性検索の出力を閉じる
 	close(SEARCH_OUT);
+	
+	# 参照配列のfastaインデックスを破棄
+	undef($ref_faidx);
 	
 	# データ入力スレッドが終了するまで待機
 	$data_input_thread->join or &exception::error("data input thread abnormally exited");
@@ -1742,13 +1774,13 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+				my ($query, @locus) = unpack($locus_decode_template, $dat);
 				
 				# アイソフォームを分離
 				my $isoforms = &common::define_isoforms(\@locus, $opt{"v"}, $opt{"t"});
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$isoforms}), @{$isoforms}));
+				$output->enqueue(pack($locus_encode_template, $query, scalar(@{$isoforms}), @{$isoforms}));
 			}
 			
 			# スレッドを終了
@@ -1769,7 +1801,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($query, @locus) = unpack("S/A*L/(L/a*)*", $dat);
+			my ($query, @locus) = unpack($locus_decode_template, $dat);
 			
 			# 結果をバッファに保存
 			$output_buffer{$query} = \@locus;
@@ -1779,7 +1811,7 @@ sub body {
 		my $gene_id = 0;
 		
 		# 結果を出力
-		foreach my $query (sort {$a cmp $b} keys(%output_buffer)) {&common::output($output_buffer{$query}, $gene_id, $opt{"n"}, $opt{"f"});}
+		foreach my $query (sort {$id_order{$a} <=> $id_order{$b}} keys(%output_buffer)) {&common::output($output_buffer{$query}, $gene_id, $opt{"n"}, $opt{"f"});}
 		
 		# スレッドを終了
 		return(1);
@@ -1787,7 +1819,7 @@ sub body {
 	## ここまでデータ統合スレッドの処理 ##
 	
 	# 各クエリーについて、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-	foreach my $query (keys(%loci)) {$input->enqueue(pack("S/A*L(L/a*)*", $query, scalar(@{$loci{$query}}), @{$loci{$query}})) if threads->list(threads::running) > $opt{"p"};}
+	foreach my $query (keys(%loci)) {$input->enqueue(pack($locus_encode_template, $query, scalar(@{$loci{$query}}), @{$loci{$query}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
@@ -2084,12 +2116,12 @@ sub read_fasta {
 			($id_key, $seq_length, $seq_start, $row_width, $row_bytes) = split(/\t/, $line);
 			
 			# インデックスハッシュにデータをバイナリ形式で登録
-			$faidx{$id_key} = pack("QQLQLL", $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes);
+			$faidx{$id_key} = pack($faidx_template, $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes);
 			
 			# ID開始点を更新
 			$id_start = $seq_start + int($seq_length / $row_width) * $row_bytes + $seq_length % $row_width;
 			
-			# 行番号を加算
+			# ID番号を加算
 			$id_order++;
 		}
 		print STDERR "completed\n";
@@ -2138,7 +2170,7 @@ sub read_fasta {
 			# ID行およびファイル末の処理
 			if ($line =~ /^>/ or eof(FASTA)) {
 				# インデックスハッシュに直前のデータをバイナリ形式で登録し、インデックスファイルに直前のデータを書き込む
-				$faidx{$id_key} = pack("QQLQLL", $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes) and print FASTA_INDEX "$id_key\t$seq_length\t$seq_start\t$row_width\t$row_bytes\n" if defined($id_key);
+				$faidx{$id_key} = pack($faidx_template, $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes) and print FASTA_INDEX "$id_key\t$seq_length\t$seq_start\t$row_width\t$row_bytes\n" if defined($id_key);
 				
 				# IDの最初の空白文字の前までをハッシュキーとして取得
 				($id_key) = split(/\s/, substr($line, 1));
@@ -2149,7 +2181,7 @@ sub read_fasta {
 				# ID開始点を更新
 				$id_start = $seq_start - $row_bytes1;
 				
-				# 行番号を加算
+				# ID番号を加算
 				$id_order++;
 				
 				# その他の情報をリセット
@@ -2172,19 +2204,16 @@ sub read_fasta {
 	return(\%faidx);
 }
 
-# fastaインデックス復号 common::decode_faidx(バイナリfastaインデックスハッシュリファレンス, IDハッシュキー)
+# fastaインデックス復号 common::decode_faidx(バイナリfastaインデックス)
 sub decode_faidx {
 	# 引数を取得
-	my ($bin_faidx, $id_key) = @_;
-	
-	# IDハッシュキーを確認
-	&exception::error("unknown sequence ID key declared: $id_key") if !exists($bin_faidx->{$id_key});
+	my ($bin_faidx) = @_;
 	
 	# 変数を宣言
 	my %faidx = ();
 	
 	# データを変換してハッシュに登録
-	@faidx{("id_order", "id_start", "seq_length", "seq_start", "row_width", "row_bytes")} = unpack("QQLQLL", $bin_faidx->{$id_key});
+	@faidx{("id_order", "id_start", "seq_length", "seq_start", "row_width", "row_bytes")} = unpack($faidx_template, $bin_faidx);
 	
 	# ハッシュリファレンスを返す
 	return(\%faidx);
