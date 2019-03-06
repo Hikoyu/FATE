@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.5.0";	# ソフトウェアのバージョン
+my $version = "ver.2.5.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -1118,7 +1118,7 @@ sub body {
 			# クエリー名が変わった場合
 			if (!defined($last_query) or $col[0] ne $last_query) {
 				# 条件を満たす場合はハッシュにデータをバイナリ形式で登録
-				push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if @{&common::sift_hits(\%blast_hits, $opt{"r"}, (defined($last_query) and defined($opt{"a"})) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
+				push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if defined($last_query) and @{&common::sift_hits(\%blast_hits, 1, $opt{"r"}, defined($opt{"a"}) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
 				
 				# ヒットハッシュをリセット
 				%blast_hits = ();
@@ -1147,7 +1147,7 @@ sub body {
 		}
 		
 		# 条件を満たす場合はハッシュに残りのデータをバイナリ形式で登録
-		push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if @{&common::sift_hits(\%blast_hits, $opt{"r"}, (defined($last_query) and defined($opt{"a"})) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
+		push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if defined($last_query) and @{&common::sift_hits(\%blast_hits, 1, $opt{"r"}, defined($opt{"a"}) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
 		
 		# 相同性検索の出力を閉じる
 		close(SEARCH_OUT);
@@ -1519,6 +1519,9 @@ sub body {
 					# 開始点をbed形式に合わせる
 					$col[3]--;
 					
+					# 終止点が対象配列長よりも大きい場合は対象配列長を超えない最大の3の倍数にする
+					$col[4] = int(length($target_seq) / 3) * 3 if $col[4] > length($target_seq);
+					
 					# match行またはgene行の処理
 					push(@genes, [$query, $col[3], $col[4], $subject, $col[5], $col[6], 0, 0, ".", 0, [], [], $query_start, $query_end]) if $col[2] eq "match" or $col[2] eq "gene";
 					
@@ -1705,7 +1708,7 @@ sub body {
 		# クエリー名が変わった場合
 		if (!defined($last_query) or $col[0] ne $last_query) {
 			# 条件を満たす各ヒットについて処理
-			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
+			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"s"}, $opt{"r"}, $opt{"k"})}) {
 				# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
 				$input->enqueue(pack($query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
 			}
@@ -1722,7 +1725,7 @@ sub body {
 	}
 	
 	# 条件を満たす残りの各ヒットについて処理
-	foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"r"}, $opt{"k"})}) {
+	foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"s"}, $opt{"r"}, $opt{"k"})}) {
 		# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
 		$input->enqueue(pack($query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
 	}
@@ -2219,10 +2222,10 @@ sub decode_faidx {
 	return(\%faidx);
 }
 
-# 相同性検索ヒットの選別 common::sift_hits(相同性検索ヒットハッシュリファレンス, ランク閾値, キーワード)
+# 相同性検索ヒットの選別 common::sift_hits(相同性検索ヒットハッシュリファレンス, 向き限定フラグ, ランク閾値, キーワード)
 sub sift_hits {
 	# 引数を取得
-	my ($homology_hits, $cutoff_rank, $key_words) = @_;
+	my ($homology_hits, $stranded_flag, $cutoff_rank, $key_words) = @_;
 	
 	# 変数を宣言
 	my %score = ();
@@ -2230,25 +2233,42 @@ sub sift_hits {
 	# 各サブジェクトについて処理
 	foreach my $subject (keys(%{$homology_hits})) {
 		# 変数を宣言
-		my $query_array = "";
-		my $target_array = "";
-		my $total_score = 0;
-		my $total_length = 0;
+		my @query_array = ("", "");
+		my @target_array = ("", "");
+		my @total_score = (0, 0);
+		my @total_length = (0, 0);
 		
 		# 各ヒットについて処理
 		foreach my $hit (@{$homology_hits->{$subject}}) {
-			for (List::Util::min($hit->{"query_start"}, $hit->{"query_end"})..List::Util::max($hit->{"query_start"}, $hit->{"query_end"})) {vec($query_array, $_, 1) = 1;}
-			for (List::Util::min($hit->{"subject_start"}, $hit->{"subject_end"})..List::Util::max($hit->{"subject_start"}, $hit->{"subject_end"})) {vec($target_array, $_, 1) = 1;}
-			$total_score += $hit->{"score"};
-			$total_length += abs($hit->{"query_end"} - $hit->{"query_start"}) + abs($hit->{"subject_end"} - $hit->{"subject_start"}) + 2;
+			# ヒットの向きを算出
+			my $strand = ($hit->{"query_start"} < $hit->{"query_end"}) ^ ($hit->{"subject_start"} < $hit->{"subject_end"});
+			
+			# 向き限定フラグが立っている場合は逆向きのヒットを除外
+			next if $stranded_flag and $strand;
+			
+			# クエリーがアラインメントされた領域を登録
+			for (List::Util::min($hit->{"query_start"}, $hit->{"query_end"})..List::Util::max($hit->{"query_start"}, $hit->{"query_end"})) {vec($query_array[$strand], $_, 1) = 1;}
+			
+			# サブジェクトがアラインメントされた領域を登録
+			for (List::Util::min($hit->{"subject_start"}, $hit->{"subject_end"})..List::Util::max($hit->{"subject_start"}, $hit->{"subject_end"})) {vec($target_array[$strand], $_, 1) = 1;}
+			
+			# スコアを加算
+			$total_score[$strand] += $hit->{"score"};
+			
+			# アラインメント長を加算
+			$total_length[$strand] += abs($hit->{"query_end"} - $hit->{"query_start"}) + abs($hit->{"subject_end"} - $hit->{"subject_start"}) + 2;
 		}
 		
-		# スコアを算出
-		$score{$subject} = &common::population_count($query_array . $target_array) * $total_score / $total_length;
+		# スコアを正規化
+		my $forward_score = $total_length[0] ? &common::population_count($query_array[0] . $target_array[0]) * $total_score[0] / $total_length[0] : 0;
+		my $reverse_score = $total_length[1] ? &common::population_count($query_array[1] . $target_array[1]) * $total_score[1] / $total_length[1] : 0;
+		
+		# 正規化されたスコアのうち大きい方を登録
+		$score{$subject} = List::Util::max($forward_score, $reverse_score);
 	}
 	
-	# ヒットをスコア順に並べ替え
-	my @subjects = sort {$score{$b} <=> $score{$a}} keys(%score);
+	# ヒットを正規化したスコア順に並べ替え
+	my @subjects = sort {$score{$b} <=> $score{$a} || $a cmp $b} grep {$score{$_} > 0} keys(%score);
 	
 	# 指定値より下位のヒットを削除 (ランク閾値指定時)
 	splice(@subjects, $cutoff_rank) if $cutoff_rank;
