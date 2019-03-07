@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.5.2";	# ソフトウェアのバージョン
+my $version = "ver.2.6.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -77,7 +77,7 @@ use constant {
 	loci_decode_template => "S/A*L/(L/a*)*",
 	locus_encode_template => "S/A*LLcL(L/a*)*",
 	locus_decode_template => "S/A*LLcL/(L/a*)*",
-	faidx_template => "QQLQLL",
+	faidx_template => (~0 >> 31 == 1) ? "L6" : "QQLQLL",
 };
 
 # 遺伝子型のカラーコードを定義
@@ -1908,15 +1908,18 @@ sub population_count {
 	# 変数を宣言
 	my $count = 0;
 	
-	# 64-bitごとに分割統治法で立っているビット数を算出
-	foreach my $qword (unpack("Q*", $bit_array . chr(0) x 7)) {
-		$qword = ($qword & 0x5555555555555555) + ($qword >> 1 & 0x5555555555555555);
-		$qword = ($qword & 0x3333333333333333) + ($qword >> 2 & 0x3333333333333333);
-		$qword = ($qword & 0x0F0F0F0F0F0F0F0F) + ($qword >> 4 & 0x0F0F0F0F0F0F0F0F);
-		$qword = ($qword & 0x00FF00FF00FF00FF) + ($qword >> 8 & 0x00FF00FF00FF00FF);
-		$qword = ($qword & 0x0000FFFF0000FFFF) + ($qword >> 16 & 0x0000FFFF0000FFFF);
-		$qword = ($qword & 0x00000000FFFFFFFF) + ($qword >> 32 & 0x00000000FFFFFFFF);
-		$count += $qword;
+	# 32-bitのブロック数を算出
+	my $num_blocks = length($bit_array) / 4;
+	
+	# 32-bitごとに分割統治法で立っているビット数を算出
+	for (my $i = 0;$i < $num_blocks;$i++) {
+		my $dword = vec($bit_array, $i, 32);
+		$dword = ($dword & 0x55555555) + ($dword >> 1 & 0x55555555);
+		$dword = ($dword & 0x33333333) + ($dword >> 2 & 0x33333333);
+		$dword = ($dword & 0x0F0F0F0F) + ($dword >> 4 & 0x0F0F0F0F);
+		$dword = ($dword & 0x00FF00FF) + ($dword >> 8 & 0x00FF00FF);
+		$dword = ($dword & 0x0000FFFF) + ($dword >> 16 & 0x0000FFFF);
+		$count += $dword;
 	}
 	
 	# 結果を返す
@@ -1954,7 +1957,7 @@ sub check_blastdb {
 	my ($seq_type, $command) = $seq_type_flag ? ("prot", "blastx") : ("nucl", "blastn");
 	
 	# BLASTデータベースファイルを確認
-	return(1) if !system("$command -query /dev/null -db $file >/dev/null 2>&1");
+	return(1) if system("$command -query /dev/null -db $file >/dev/null 2>&1") < 0x200;
 	&exception::caution("BLAST database file unavailable: $file");
 	
 	# BLASTデータベースファイルを作成
