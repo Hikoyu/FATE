@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.5.1";	# ソフトウェアのバージョン
+my $version = "ver.2.5.2";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -68,11 +68,25 @@ use Thread::Queue;
 use threads::shared;
 no warnings 'portable';
 
+# データ変換テンプレートを定義
+use constant {
+	bed6_mask_template => "S/A*LLS/A*C/A*cL/a*L/a*a36",
+	bed12_template => "S/A*LLS/A*C/A*cLLLLL/a*L/a*",
+	query_subject_template => "S/A*S/A*Ca36",
+	loci_encode_template => "S/A*L(L/a*)*",
+	loci_decode_template => "S/A*L/(L/a*)*",
+	locus_encode_template => "S/A*LLcL(L/a*)*",
+	locus_decode_template => "S/A*LLcL/(L/a*)*",
+	faidx_template => "QQLQLL",
+};
+
 # 遺伝子型のカラーコードを定義
-use constant functional => 0x0000FF;
-use constant truncated => 0xFFFF00;
-use constant pseudogene => 0xFF0000;
-use constant uncharacterized => 0x000000;
+use constant {
+	functional => 0x0000FF,
+	truncated => 0xFFFF00,
+	pseudogene => 0xFF0000,
+	uncharacterized => 0x000000,
+};
 
 # 基本16色のカラーコードを定義
 my %color = (
@@ -117,14 +131,6 @@ my %codon = (
 	"YTA" => "L", "YTG" => "L", "YTR" => "L",
 	"MGA" => "R", "MGG" => "R", "MGR" => "R"
 );
-
-# データ変換テンプレートを定義
-my $bed6_mask_template = "S/A*LLS/A*C/A*cL/a*L/a*a36";
-my $bed12_template = "S/A*LLS/A*C/A*cLLLLL/a*L/a*";
-my $query_subject_template = "S/A*S/A*Ca36";
-my $locus_encode_template = "S/A*L(L/a*)*";
-my $locus_decode_template = "S/A*L/(L/a*)*";
-my $faidx_template = "QQLQLL";
 
 # 処理を追加
 ### 編集範囲 終了 ###
@@ -317,8 +323,8 @@ sub body {
 			if ($line =~ /^>/ or eof) {
 				# 配列データを処理
 				if (defined($query_title)) {
-					# レポートキューにクエリー名とクエリー配列長をバイナリ形式で追加
-					$report->enqueue(pack("S/A*L", $query_title, length($query_seq)));
+					# レポートキューにクエリー配列長とクエリー名をバイナリ形式で追加
+					$report->enqueue(pack("LA*", length($query_seq), $query_title));
 					
 					# クエリー配列をファイルに出力 (-g指定時)
 					if ($opt{"g"}) {
@@ -392,7 +398,7 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($subject, $locus_start, $locus_end, $query, $query_len, $strand, $mask_block_size, $mask_block_start, $bin_faidx) = unpack($bed6_mask_template, $dat);
+				my ($subject, $locus_start, $locus_end, $query, $query_len, $strand, $mask_block_size, $mask_block_start, $bin_faidx) = unpack(main::bed6_mask_template, $dat);
 				
 				# 変数を宣言
 				my $faidx = &common::decode_faidx($bin_faidx);
@@ -602,11 +608,11 @@ sub body {
 					}
 					
 					# データをバイナリ形式に変換
-					$gene = pack($bed12_template, @{$gene}[0..9], pack("L*", @{$gene->[10]}), pack("L*", @{$gene->[11]}));
+					$gene = pack(main::bed12_template, @{$gene}[0..9], pack("L*", @{$gene->[10]}), pack("L*", @{$gene->[11]}));
 				}
 				
 				# 出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack($locus_encode_template, $subject, scalar(@genes), @genes));
+				$output->enqueue(pack(main::loci_encode_template, $subject, scalar(@genes), @genes));
 			}
 			
 			# ゲノム配列のfastaファイルを閉じる
@@ -630,7 +636,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($subject, @locus) = unpack($locus_decode_template, $dat);
+			my ($subject, @locus) = unpack(main::loci_decode_template, $dat);
 			
 			# キーが未登録の場合はキーと共有配列のリファレンスを登録
 			$loci{$subject} = &threads::shared::share([]) if !exists($loci{$subject});
@@ -686,10 +692,10 @@ sub body {
 					$loci{$last_subject} = &threads::shared::share([]) if !$opt{"g"} and !exists($loci{$last_subject});
 					
 					# ハッシュにアセンブリーデータをバイナリ形式で登録 (-g未指定時)
-					push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, 0, scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
+					push(@{$loci{$last_subject}}, pack(main::bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, 0, scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
 					
 					# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
-					$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}), $genome_faidx->{$last_subject})) if threads->list(threads::running) > $opt{"p"};
+					$input->enqueue(pack(main::bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}), $genome_faidx->{$last_subject})) if threads->list(threads::running) > $opt{"p"};
 				}
 			}
 			
@@ -698,11 +704,11 @@ sub body {
 				# レポートキューからデータをバイナリ形式で受信
 				my $dat = $report->dequeue or &exception::error("query not found in homology search results probably due to inconsistent data order");
 				
-				# クエリー名とクエリー配列長を取得
-				my ($query_title, $query_len) = unpack("S/A*L", $dat);
+				# クエリー配列長とクエリー名を取得
+				my ($query_len, $query_title) = unpack("LA*", $dat);
 				
-				# クエリー名とクエリー配列長を保存
-				($last_query, $query_len{$query_title}) = ($query_title, $query_len);
+				# クエリー配列長とクエリー名を保存
+				($query_len{$query_title}, $last_query) = ($query_len, $query_title);
 			}
 			
 			# サブジェクト名を更新
@@ -733,10 +739,10 @@ sub body {
 			$loci{$last_subject} = &threads::shared::share([]) if !$opt{"g"} and !exists($loci{$last_subject});
 			
 			# ハッシュにアセンブリーデータをバイナリ形式で登録 (-g未指定時)
-			push(@{$loci{$last_subject}}, pack($bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, 0, scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
+			push(@{$loci{$last_subject}}, pack(main::bed12_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $assembly->{"total_score"}, $locus->{"strand"}, $locus->{"locus_start"}, $assembly->{"locus_destination"}, 0, scalar(@{$assembly->{"block_size"}}), pack("L*", @{$assembly->{"block_size"}}), pack("L*", map {$_ - $locus->{"locus_start"}} @{$assembly->{"block_start"}}))) and next if !$opt{"g"};
 			
 			# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
-			$input->enqueue(pack($bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}), $genome_faidx->{$last_subject})) if threads->list(threads::running) > $opt{"p"};
+			$input->enqueue(pack(main::bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}), $genome_faidx->{$last_subject})) if threads->list(threads::running) > $opt{"p"};
 		}
 	}
 	
@@ -787,13 +793,13 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($subject, @locus) = unpack($locus_decode_template, $dat);
+				my ($subject, @locus) = unpack(main::loci_decode_template, $dat);
 				
 				# アイソフォームを分離
 				my $isoforms = &common::define_isoforms(\@locus, $opt{"v"}, $opt{"t"});
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack($locus_encode_template, $subject, scalar(@{$isoforms}), @{$isoforms}));
+				$output->enqueue(pack(main::loci_encode_template, $subject, scalar(@{$isoforms}), @{$isoforms}));
 			}
 			
 			# スレッドを終了
@@ -814,7 +820,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($subject, @locus) = unpack($locus_decode_template, $dat);
+			my ($subject, @locus) = unpack(main::loci_decode_template, $dat);
 			
 			# 結果をバッファに保存
 			$output_buffer{$subject} = \@locus;
@@ -832,7 +838,7 @@ sub body {
 	## ここまでデータ統合スレッドの処理 ##
 	
 	# 各遺伝子座について、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-	foreach my $subject (keys(%loci)) {$input->enqueue(pack($locus_encode_template, $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}})) if threads->list(threads::running) > $opt{"p"};}
+	foreach my $subject (keys(%loci)) {$input->enqueue(pack(main::loci_encode_template, $subject, scalar(@{$loci{$subject}}), @{$loci{$subject}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
@@ -1032,7 +1038,7 @@ sub body {
 			&common::check_bed(\@col, "$opt{n}$.");
 			
 			# レポートキューにbedデータをバイナリ形式で送信
-			$report->enqueue(pack($bed12_template, @col));
+			$report->enqueue(pack(main::bed12_template, @col));
 			
 			# 未登録の場合はID番号を登録
 			$id_order{$col[0]} = $faidx->{"id_order"} if !exists($id_order{$col[0]});
@@ -1118,7 +1124,7 @@ sub body {
 			# クエリー名が変わった場合
 			if (!defined($last_query) or $col[0] ne $last_query) {
 				# 条件を満たす場合はハッシュにデータをバイナリ形式で登録
-				push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if defined($last_query) and @{&common::sift_hits(\%blast_hits, 1, $opt{"r"}, defined($opt{"a"}) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
+				push(@{$loci{$last_contig}}, pack(main::bed12_template, @bed_data)) if defined($last_query) and @{&common::sift_hits(\%blast_hits, 1, $opt{"r"}, defined($opt{"a"}) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
 				
 				# ヒットハッシュをリセット
 				%blast_hits = ();
@@ -1132,7 +1138,7 @@ sub body {
 					my $dat = $report->dequeue or &exception::error("query not found in bed data probably due to inconsistent data order");
 					
 					# bedデータを変換
-					@bed_data = unpack($bed12_template, $dat);
+					@bed_data = unpack(main::bed12_template, $dat);
 				}
 				
 				# コンティグ名が変わった場合はコンティグ名を更新
@@ -1147,7 +1153,7 @@ sub body {
 		}
 		
 		# 条件を満たす場合はハッシュに残りのデータをバイナリ形式で登録
-		push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data)) if defined($last_query) and @{&common::sift_hits(\%blast_hits, 1, $opt{"r"}, defined($opt{"a"}) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
+		push(@{$loci{$last_contig}}, pack(main::bed12_template, @bed_data)) if defined($last_query) and @{&common::sift_hits(\%blast_hits, 1, $opt{"r"}, defined($opt{"a"}) ? $keyword_table->{substr($last_query, index($last_query, ":") + 1)} : $opt{"k"})};
 		
 		# 相同性検索の出力を閉じる
 		close(SEARCH_OUT);
@@ -1158,13 +1164,13 @@ sub body {
 		# レポートキューからbedデータをバイナリ形式で受信しながら処理
 		while (defined(my $dat = $report->dequeue)) {
 			# bedデータを変換
-			@bed_data = unpack($bed12_template, $dat);
+			@bed_data = unpack(main::bed12_template, $dat);
 			
 			# コンティグ名が変わった場合はコンティグ名を更新
 			$last_contig = $bed_data[0] if $bed_data[0] ne $last_contig;
 			
 			# ハッシュにデータをバイナリ形式で登録
-			push(@{$loci{$last_contig}}, pack($bed12_template, @bed_data));
+			push(@{$loci{$last_contig}}, pack(main::bed12_template, @bed_data));
 		}
 	}
 	
@@ -1198,13 +1204,13 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($subject, @locus) = unpack($locus_decode_template, $dat);
+				my ($subject, @locus) = unpack(main::loci_decode_template, $dat);
 				
 				# アイソフォームを分離
 				my $isoforms = &common::define_isoforms(\@locus, $opt{"v"}, $opt{"t"});
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack($locus_encode_template, $subject, scalar(@{$isoforms}), @{$isoforms}));
+				$output->enqueue(pack(main::loci_encode_template, $subject, scalar(@{$isoforms}), @{$isoforms}));
 			}
 			
 			# スレッドを終了
@@ -1225,7 +1231,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($subject, @locus) = unpack($locus_decode_template, $dat);
+			my ($subject, @locus) = unpack(main::loci_decode_template, $dat);
 			
 			# 結果をバッファに保存
 			$output_buffer{$subject} = \@locus;
@@ -1243,7 +1249,7 @@ sub body {
 	## ここまでデータ統合スレッドの処理 ##
 	
 	# 各コンティグについて、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-	foreach my $contig (keys(%loci)) {$input->enqueue(pack($locus_encode_template, $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}})) if threads->list(threads::running) > $opt{"p"};}
+	foreach my $contig (keys(%loci)) {$input->enqueue(pack(main::loci_encode_template, $contig, scalar(@{$loci{$contig}}), @{$loci{$contig}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
@@ -1437,7 +1443,7 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($query, $subject, $strand, $bin_faidx) = unpack($query_subject_template, $dat);
+				my ($query, $subject, $strand, $bin_faidx) = unpack(main::query_subject_template, $dat);
 				
 				# 変数を宣言
 				my $target_seq = "";
@@ -1632,11 +1638,11 @@ sub body {
 					($gene->[6], $gene->[7]) = ($gene->[1], $gene->[2]);
 					
 					# データをバイナリ形式に変換
-					$gene = pack($bed12_template, @{$gene}[0..9], pack("L*", @{$gene->[10]}), pack("L*", @{$gene->[11]}));
+					$gene = pack(main::bed12_template, @{$gene}[0..9], pack("L*", @{$gene->[10]}), pack("L*", @{$gene->[11]}));
 				}
 				
 				# 出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack($locus_encode_template, $query, scalar(@genes), @genes));
+				$output->enqueue(pack(main::loci_encode_template, $query, scalar(@genes), @genes));
 			}
 			
 			# 参照配列のfastaファイルを閉じる
@@ -1660,7 +1666,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($query, @locus) = unpack($locus_decode_template, $dat);
+			my ($query, @locus) = unpack(main::loci_decode_template, $dat);
 			
 			# キーが未登録の場合はキーと共有配列のリファレンスを登録
 			$loci{$query} = &threads::shared::share([]) if !exists($loci{$query});
@@ -1710,7 +1716,7 @@ sub body {
 			# 条件を満たす各ヒットについて処理
 			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"s"}, $opt{"r"}, $opt{"k"})}) {
 				# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-				$input->enqueue(pack($query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
+				$input->enqueue(pack(main::query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
 			}
 			
 			# ヒットハッシュをリセット
@@ -1727,7 +1733,7 @@ sub body {
 	# 条件を満たす残りの各ヒットについて処理
 	foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"s"}, $opt{"r"}, $opt{"k"})}) {
 		# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-		$input->enqueue(pack($query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
+		$input->enqueue(pack(main::query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
 	}
 	
 	# 相同性検索の出力を閉じる
@@ -1777,13 +1783,13 @@ sub body {
 			# 入力キューからデータをバイナリ形式で取得して処理
 			while (defined(my $dat = $input->dequeue)) {
 				# データを変換
-				my ($query, @locus) = unpack($locus_decode_template, $dat);
+				my ($query, @locus) = unpack(main::loci_decode_template, $dat);
 				
 				# アイソフォームを分離
 				my $isoforms = &common::define_isoforms(\@locus, $opt{"v"}, $opt{"t"});
 				
 				# アイソフォームを分離し、出力キューにデータをバイナリ形式で追加
-				$output->enqueue(pack($locus_encode_template, $query, scalar(@{$isoforms}), @{$isoforms}));
+				$output->enqueue(pack(main::loci_encode_template, $query, scalar(@{$isoforms}), @{$isoforms}));
 			}
 			
 			# スレッドを終了
@@ -1804,7 +1810,7 @@ sub body {
 		# 出力キューからデータをバイナリ形式で取得して処理
 		while (defined(my $dat = $output->dequeue)) {
 			# データを変換
-			my ($query, @locus) = unpack($locus_decode_template, $dat);
+			my ($query, @locus) = unpack(main::loci_decode_template, $dat);
 			
 			# 結果をバッファに保存
 			$output_buffer{$query} = \@locus;
@@ -1822,7 +1828,7 @@ sub body {
 	## ここまでデータ統合スレッドの処理 ##
 	
 	# 各クエリーについて、実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
-	foreach my $query (keys(%loci)) {$input->enqueue(pack($locus_encode_template, $query, scalar(@{$loci{$query}}), @{$loci{$query}})) if threads->list(threads::running) > $opt{"p"};}
+	foreach my $query (keys(%loci)) {$input->enqueue(pack(main::loci_encode_template, $query, scalar(@{$loci{$query}}), @{$loci{$query}})) if threads->list(threads::running) > $opt{"p"};}
 	
 	# 入力キューを終了
 	$input->end;
@@ -2119,7 +2125,7 @@ sub read_fasta {
 			($id_key, $seq_length, $seq_start, $row_width, $row_bytes) = split(/\t/, $line);
 			
 			# インデックスハッシュにデータをバイナリ形式で登録
-			$faidx{$id_key} = pack($faidx_template, $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes);
+			$faidx{$id_key} = pack(main::faidx_template, $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes);
 			
 			# ID開始点を更新
 			$id_start = $seq_start + int($seq_length / $row_width) * $row_bytes + $seq_length % $row_width;
@@ -2173,7 +2179,7 @@ sub read_fasta {
 			# ID行およびファイル末の処理
 			if ($line =~ /^>/ or eof(FASTA)) {
 				# インデックスハッシュに直前のデータをバイナリ形式で登録し、インデックスファイルに直前のデータを書き込む
-				$faidx{$id_key} = pack($faidx_template, $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes) and print FASTA_INDEX "$id_key\t$seq_length\t$seq_start\t$row_width\t$row_bytes\n" if defined($id_key);
+				$faidx{$id_key} = pack(main::faidx_template, $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes) and print FASTA_INDEX "$id_key\t$seq_length\t$seq_start\t$row_width\t$row_bytes\n" if defined($id_key);
 				
 				# IDの最初の空白文字の前までをハッシュキーとして取得
 				($id_key) = split(/\s/, substr($line, 1));
@@ -2216,7 +2222,7 @@ sub decode_faidx {
 	my %faidx = ();
 	
 	# データを変換してハッシュに登録
-	@faidx{("id_order", "id_start", "seq_length", "seq_start", "row_width", "row_bytes")} = unpack($faidx_template, $bin_faidx);
+	@faidx{("id_order", "id_start", "seq_length", "seq_start", "row_width", "row_bytes")} = unpack(main::faidx_template, $bin_faidx);
 	
 	# ハッシュリファレンスを返す
 	return(\%faidx);
@@ -2287,7 +2293,7 @@ sub define_isoforms {
 	my @loci = ();
 	
 	# データを順に整理
-	foreach my $locus (map {[unpack($bed12_template, $_)]} @{$locus_data_list}) {
+	foreach my $locus (map {[unpack(main::bed12_template, $_)]} @{$locus_data_list}) {
 		# データを変換
 		my @block_size = unpack("L*", $locus->[10]);
 		my @block_start = unpack("L*", $locus->[11]);
@@ -2370,10 +2376,10 @@ sub define_isoforms {
 	}
 	
 	# 各領域についてデータをバイナリ形式に変換
-	foreach my $locus (@loci) {@{$locus->[1]} = map {pack($bed12_template, @{$_})} @{$locus->[1]};}
+	foreach my $locus (@loci) {@{$locus->[1]} = map {pack(main::bed12_template, @{$_})} @{$locus->[1]};}
 	
 	# 並べ替え (開始点 > 終了点 > 向き) た領域データリストリファレンスを返す
-	return([map {pack("S/A*LLcL(L/a*)*", @{$_->[0]}, scalar(@{$_->[1]}), @{$_->[1]})} sort {$a->[0]->[1] <=> $b->[0]->[1] or $a->[0]->[2] <=> $b->[0]->[2] or $a->[0]->[3] cmp $b->[0]->[3]} @loci]);
+	return([map {pack(main::locus_encode_template, @{$_->[0]}, scalar(@{$_->[1]}), @{$_->[1]})} sort {$a->[0]->[1] <=> $b->[0]->[1] or $a->[0]->[2] <=> $b->[0]->[2] or $a->[0]->[3] cmp $b->[0]->[3]} @loci]);
 }
 
 # データを出力 common::output(領域データリストリファレンス, 遺伝子ID, プレフィックス, 出力形式)
@@ -2385,7 +2391,7 @@ sub output {
 	my %type = (main::functional => "protein_coding", main::truncated => "truncated", main::pseudogene => "pseudogene", main::uncharacterized => "uncharacterized");
 	
 	# データを出力
-	foreach my $locus (map {[unpack("S/A*LLcL/(L/a*)*", $_)]} @{$locus_data_list}) {
+	foreach my $locus (map {[unpack(main::locus_decode_template, $_)]} @{$locus_data_list}) {
 		# 遺伝子IDを更新
 		$gene_id++;
 		
@@ -2399,7 +2405,7 @@ sub output {
 		my $isoform_id = 0;
 		
 		# アイソフォームを順に処理
-		foreach my $isoform (map {[unpack($bed12_template, $_)]} @{$locus}) {
+		foreach my $isoform (map {[unpack(main::bed12_template, $_)]} @{$locus}) {
 			# アイソフォームIDを更新
 			$isoform_id++;
 			
