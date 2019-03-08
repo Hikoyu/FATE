@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.6.0";	# ソフトウェアのバージョン
+my $version = "ver.2.6.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -1574,7 +1574,7 @@ sub body {
 						$start_pos *= 3;
 						
 						# 開始コドンを考慮しても5'側クエリー被覆率が指定値以上の場合は先頭ブロックを修正
-						($gene->[10]->[0], $gene->[11]->[0]) = ($gene->[10]->[0] - $start_pos * (1 - $sign), $gene->[11]->[0] + $start_pos) if $faidx->{"seq_length"} - $gene->[12] - $start_pos >= $faidx->{"seq_length"} * $opt{"c"};
+						($gene->[10]->[0], $gene->[11]->[0]) = ($gene->[10]->[0] - $start_pos, $gene->[11]->[0] + $start_pos * (1 - $sign)) if $faidx->{"seq_length"} - $gene->[12] - $start_pos >= $faidx->{"seq_length"} * $opt{"c"};
 						
 						# 5'端が完全であることを認定
 						$completeness++;
