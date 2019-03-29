@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.6.1";	# ソフトウェアのバージョン
+my $version = "ver.2.6.2";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -335,7 +335,7 @@ sub body {
 						$aa_seq =~ s/\*//g;
 						
 						# 出力ファイルを作成
-						open(PROT, ">", "prot/" . substr($query_title, 0, index($query_title, ":")) . ".fa") or &exception::error("failed to make file: prot/$query_title.fa");
+						open(PROT, ">", "prot/" . substr($query_title, 0, index($query_title . ":", ":")) . ".fa") or &exception::error("failed to make file: prot/$query_title.fa");
 						
 						# クエリー配列をfasta形式でファイルに出力
 						print PROT ">$query_title\n$aa_seq\n";
@@ -458,8 +458,8 @@ sub body {
 				my $summary_flag = 0;
 				
 				# 遺伝子構造予測の引数を定義
-				$query_file = "-q prot/" . substr($query, 0, index($query, ":")) . ".fa" if $opt{"g"} eq "exonerate";
-				$query_file = "prot/" . substr($query, 0, index($query, ":")) . ".fa" if $opt{"g"} eq "genewise";
+				$query_file = "-q prot/" . substr($query, 0, index($query . ":", ":")) . ".fa" if $opt{"g"} eq "exonerate";
+				$query_file = "prot/" . substr($query, 0, index($query . ":", ":")) . ".fa" if $opt{"g"} eq "genewise";
 				$target_file = "-t nucl/locus$thread_id.fa" if $opt{"g"} eq "exonerate";
 				$target_file = "nucl/locus$thread_id.fa" if $opt{"g"} eq "genewise";
 				$query_file =~ s/\|/\\\|/g;
@@ -1113,7 +1113,7 @@ sub body {
 			
 			# クエリー名を編集
 			($col[0]) = split(/\s/, $col[0]);
-			$col[0] = substr($col[0], 0, rindex($col[0], "::"));
+			$col[0] = substr($col[0], 0, rindex($col[0] . "::", "::"));
 			
 			# 詳細なサブジェクト名を追加
 			$col[12] = $col[1] if !defined($col[12]);
