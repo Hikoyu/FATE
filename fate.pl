@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.6.2";	# ソフトウェアのバージョン
+my $version = "ver.2.6.3";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -1113,7 +1113,7 @@ sub body {
 			
 			# クエリー名を編集
 			($col[0]) = split(/\s/, $col[0]);
-			$col[0] = substr($col[0], 0, rindex($col[0] . "::", "::"));
+			$col[0] = substr($col[0], 0, rindex($col[0], "::"));
 			
 			# 詳細なサブジェクト名を追加
 			$col[12] = $col[1] if !defined($col[12]);
