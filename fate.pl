@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.6.3";	# ソフトウェアのバージョン
+my $version = "ver.2.7.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -385,6 +385,9 @@ sub body {
 	my @worker_thread = ();
 	my $thread_fin_flag = 1;
 	
+	# 共有変数を宣言
+	my %predict_fin_flag : shared;
+	
 	# 指定したワーカースレッド数で並列処理 (-g指定時)
 	for (my $thread_id = 0;$opt{"g"} and $thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
@@ -613,6 +616,12 @@ sub body {
 				
 				# 出力キューにデータをバイナリ形式で追加
 				$output->enqueue(pack(main::loci_encode_template, $subject, scalar(@genes), @genes));
+				
+				# 遺伝子構造予測完了フラグをロックする
+				lock(%predict_fin_flag);
+				
+				# 遺伝子構造予測完了フラグを更新し、フラグが立っていない場合はクエリー配列ファイルを削除する
+				--$predict_fin_flag{$query} or unlink("prot/" . substr($query, 0, index($query . ":", ":")) . ".fa");
 			}
 			
 			# ゲノム配列のfastaファイルを閉じる
@@ -682,7 +691,7 @@ sub body {
 		# クエリー名またはサブジェクト名が変わった場合
 		if (!defined($last_query) or $col[0] ne $last_query or $col[1] ne $last_subject) {
 			# ここまでのヒットをアセンブル
-			$assembly_data = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assemblies += scalar(map {keys(%{$_->{"assembly"}})} @{$assembly_data}) if defined($last_query);
+			$assembly_data = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) if defined($last_query);
 			
 			# 各遺伝子座について処理
 			foreach my $locus (@{$assembly_data}) {
@@ -696,6 +705,9 @@ sub body {
 					
 					# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
 					$input->enqueue(pack(main::bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}), $genome_faidx->{$last_subject})) if threads->list(threads::running) > $opt{"p"};
+					
+					# アセンブリー数を更新
+					$num_assemblies++;
 				}
 			}
 			
@@ -707,8 +719,17 @@ sub body {
 				# クエリー配列長とクエリー名を取得
 				my ($query_len, $query_title) = unpack("LA*", $dat);
 				
+				# 遺伝子構造予測完了フラグをロックする
+				lock(%predict_fin_flag);
+				
+				# 前回クエリー名が定義されている場合は遺伝子構造予測完了フラグを更新し、フラグが立っていない場合はクエリー配列ファイルを削除する
+				$predict_fin_flag{$last_query} += $num_assemblies or unlink("prot/" . substr($last_query, 0, index($last_query . ":", ":")) . ".fa") if defined($last_query);
+				
 				# クエリー配列長とクエリー名を保存
 				($query_len{$query_title}, $last_query) = ($query_len, $query_title);
+				
+				# アセンブリー数をリセット
+				$num_assemblies = 0;
 			}
 			
 			# サブジェクト名を更新
@@ -729,7 +750,7 @@ sub body {
 	}
 	
 	# ここまでのヒットをアセンブル
-	$assembly_data = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) and $num_assemblies += scalar(map {keys(%{$_->{"assembly"}})} @{$assembly_data}) if defined($last_query);
+	$assembly_data = &assemble(\@blast_hits, $opt{"i"}, $opt{"o"}) if defined($last_query);
 	
 	# 各遺伝子座について処理
 	foreach my $locus (@{$assembly_data}) {
@@ -743,7 +764,19 @@ sub body {
 			
 			# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにアセンブリーデータをバイナリ形式で追加
 			$input->enqueue(pack(main::bed6_mask_template, $last_subject, $locus->{"locus_start"}, $assembly->{"locus_destination"}, $last_query, $opt{"h"} =~ /^tblastn/ ? $query_len{$last_query} * 3 : $query_len{$last_query}, $locus->{"strand"}, pack("L*", @{$assembly->{"mask_block_size"}}), pack("L*", @{$assembly->{"mask_block_start"}}), $genome_faidx->{$last_subject})) if threads->list(threads::running) > $opt{"p"};
+			
+			# アセンブリー数を更新
+			$num_assemblies++;
 		}
+	}
+	
+	# 前回クエリー名が定義されている場合
+	if (defined($last_query)) {
+		# 遺伝子構造予測完了フラグをロックする
+		lock(%predict_fin_flag);
+		
+		# 遺伝子構造予測完了フラグを更新し、フラグが立っていない場合はクエリー配列ファイルを削除する
+		$predict_fin_flag{$last_query} += $num_assemblies or unlink("prot/" . substr($last_query, 0, index($last_query . ":", ":")) . ".fa");
 	}
 	
 	# 相同性検索の出力を閉じる
@@ -1430,6 +1463,9 @@ sub body {
 	my @worker_thread = ();
 	my $thread_fin_flag = 1;
 	
+	# 共有変数を宣言
+	my %predict_fin_flag : shared;
+	
 	# 指定したワーカースレッド数で並列処理
 	for (my $thread_id = 0;$thread_id < $opt{"p"};$thread_id++) {
 		## ここからワーカースレッドの処理 ##
@@ -1643,6 +1679,12 @@ sub body {
 				
 				# 出力キューにデータをバイナリ形式で追加
 				$output->enqueue(pack(main::loci_encode_template, $query, scalar(@genes), @genes));
+				
+				# 遺伝子構造予測完了フラグをロックする
+				lock(%predict_fin_flag);
+				
+				# 遺伝子構造予測完了フラグを更新し、フラグが立っていない場合はクエリー配列ファイルを削除する
+				--$predict_fin_flag{$query} or unlink("nucl/$query.fa");
 			}
 			
 			# 参照配列のfastaファイルを閉じる
@@ -1683,6 +1725,7 @@ sub body {
 	# 変数を宣言
 	my %blast_hits = ();
 	my $last_query = undef;
+	my $num_subjects = 0;
 	
 	# 参照配列のfastaインデックスを取得
 	my $ref_faidx = &common::read_fasta($ref_file, $opt{"w"});
@@ -1717,13 +1760,25 @@ sub body {
 			foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"s"}, $opt{"r"}, $opt{"k"})}) {
 				# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
 				$input->enqueue(pack(main::query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
+				
+				# サブジェクト数を更新
+				$num_subjects++;
 			}
+			
+			# 遺伝子構造予測完了フラグをロックする
+			lock(%predict_fin_flag);
+			
+			# 前回クエリー名が定義されている場合は遺伝子構造予測完了フラグを更新し、フラグが立っていない場合はクエリー配列ファイルを削除する
+			$predict_fin_flag{$last_query} += $num_subjects or unlink("nucl/$last_query.fa") if defined($last_query);
 			
 			# ヒットハッシュをリセット
 			%blast_hits = ();
 			
 			# クエリー名を更新
 			$last_query = $col[0];
+			
+			# サブジェクト数をリセット
+			$num_subjects = 0;
 		}
 		
 		# 検索結果をヒットハッシュに登録
@@ -1734,6 +1789,18 @@ sub body {
 	foreach my $subject (@{&common::sift_hits(\%blast_hits, $opt{"s"}, $opt{"r"}, $opt{"k"})}) {
 		# 実行中のスレッド数が指定されたワーカースレッド数より大きいことを確認して入力キューにデータをバイナリ形式で追加
 		$input->enqueue(pack(main::query_subject_template, $last_query, $subject, (List::Util::reduce {$a | $b} map {(($_->{"query_start"} < $_->{"query_end"}) ^ ($_->{"subject_start"} < $_->{"subject_end"})) + 1} @{$blast_hits{$subject}}), $ref_faidx->{$subject})) if threads->list(threads::running) > $opt{"p"};
+		
+		# サブジェクト数を更新
+		$num_subjects++;
+	}
+	
+	# 前回クエリー名が定義されている場合
+	if (defined($last_query)) {
+		# 遺伝子構造予測完了フラグをロックする
+		lock(%predict_fin_flag);
+		
+		# 遺伝子構造予測完了フラグを更新し、フラグが立っていない場合はクエリー配列ファイルを削除する
+		$predict_fin_flag{$last_query} += $num_subjects or unlink("nucl/$last_query.fa");
 	}
 	
 	# 相同性検索の出力を閉じる
