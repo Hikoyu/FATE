@@ -1,5 +1,5 @@
 ========================================
-Abridged User's Manual of FATE ver.2.7.0
+Abridged User's Manual of FATE ver.2.7.1
 ========================================
 
 Supported Operating System
@@ -58,7 +58,7 @@ $ fate.pl <command> [option] [input] [>output] [2>log]
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.2.6.2
+fate.pl ver.2.7.1
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.
@@ -68,9 +68,9 @@ Usage:
   fate.pl <command>
 
 Command:
-  filter	Filter already annotated protein-coding regions under specified conditions
-  predict	Predict protein-coding regions from cDNA sequences under specified conditions
-  search	Search protein-coding regions from genomic DNA sequences under specified conditions
+  filter	Filter already annotated protein-coding regions
+  predict	Predict protein-coding regions from cDNA sequences
+  search	Search protein-coding regions from genomic DNA sequences
 
 
 [search]
@@ -90,10 +90,10 @@ Options:
   -f STR 	Output format <bed|gtf> [bed]
   -g STR 	Gene prediction engine <exonerate|genewise>
   -h STR 	Homology search engine <blastn|dc-megablast|megablast|tblastn|tblastn-fast> [blastn]
-  -i INT 	Maximum interval length allowed to assemble initial hits [100000]
+  -i INT 	Maximum interval length for assembling initial hits [100000]
   -l INT 	Minimum length to regard as complete CDS <0-> [0]
   -n STR 	Prefix of each locus name [locus]
-  -o INT 	Maximum overlap/gap length of query boundries allowed to assemble initial hits [30]
+  -o INT 	Maximum overlap/gap length of query boundries for assembling initial hits [30]
   -p INT 	Number of parallel worker threads <1-> [1]
   -s		Force GT-AG rule for splice junctions
   -t INT 	Output biotype (+1:functional genes, +2:truncated genes, +4:pseudogenes) <1-7> [7]

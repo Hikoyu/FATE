@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-# Copyright (c) 2016-2018 Hikoyu Suzuki
+# Copyright (c) 2016-2019 Hikoyu Suzuki
 # This software is released under the MIT License.
 
 use strict;
@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.7.0";	# ソフトウェアのバージョン
+my $version = "ver.2.7.1";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -19,9 +19,9 @@ my $usage = "<required items> [optional items]";	# ソフトウェアの使用�
 # コマンドを定義
 my %command;
 ### 編集範囲 開始 ###
-$command{"search"} = "Search protein-coding regions from genomic DNA sequences under specified conditions";
-$command{"filter"} = "Filter already annotated protein-coding regions under specified conditions";
-$command{"predict"} = "Predict protein-coding regions from cDNA sequences under specified conditions";
+$command{"search"} = "Search protein-coding regions from genomic DNA sequences";
+$command{"filter"} = "Filter already annotated protein-coding regions";
+$command{"predict"} = "Predict protein-coding regions from cDNA sequences";
 ### 編集範囲 終了 ###
 my @command_list = sort(keys(%command));
 
@@ -221,8 +221,8 @@ sub define {
 	$option{"h STR "} = "Homology search engine <blastn|dc-megablast|megablast|tblastn|tblastn-fast> [blastn]";
 	$option{"5 INT "} = "Length of 5' flanking region <0-> [300]";
 	$option{"3 INT "} = "Length of 3' flanking region <0-> [300]";
-	$option{"i INT "} = "Maximum interval length allowed to assemble initial hits [100000]";
-	$option{"o INT "} = "Maximum overlap/gap length of query boundries allowed to assemble initial hits [30]";
+	$option{"i INT "} = "Maximum interval length for assembling initial hits [100000]";
+	$option{"o INT "} = "Maximum overlap/gap length of query boundries for assembling initial hits [30]";
 	$option{"l INT "} = "Minimum length to regard as complete CDS <0-> [0]";
 	$option{"c FLOAT "} = "Minimum query coverage to regard as complete CDS <0-1> [0.85]";
 	return(1);
@@ -255,7 +255,7 @@ sub body {
 	my $genome_file = shift(@ARGV);
 	
 	# 入力ファイルを確認
-	&exception::error("input file not specified") if !@ARGV and !-p STDIN;
+	&exception::error("input file not specified") if !defined($genome_file) or !@ARGV and !-p STDIN;
 	&common::check_files(\@ARGV);
 	
 	# ゲノム配列のfastaファイルを検索
@@ -995,7 +995,7 @@ sub body {
 	my $genome_file = shift(@ARGV);
 	
 	# 入力ファイルを確認
-	&exception::error("input file not specified") if !@ARGV and !-p STDIN;
+	&exception::error("input file not specified") if !defined($genome_file) or !@ARGV and !-p STDIN;
 	&common::check_files(\@ARGV);
 	
 	# クエリーアノテーションファイルを読み込む (-a指定時)
@@ -1341,7 +1341,7 @@ sub body {
 	my $ref_file = shift(@ARGV);
 	
 	# 入力ファイルを確認
-	&exception::error("input file not specified") if !@ARGV and !-p STDIN;
+	&exception::error("input file not specified") if !defined($ref_file) or !@ARGV and !-p STDIN;
 	&common::check_files(\@ARGV);
 	
 	# 参照配列のfastaファイルを検索
