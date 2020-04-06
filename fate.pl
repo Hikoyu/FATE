@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-# Copyright (c) 2016-2019 Hikoyu Suzuki
+# Copyright (c) 2016-2020 Hikoyu Suzuki
 # This software is released under the MIT License.
 
 use strict;
@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.7.1";	# ソフトウェアのバージョン
+my $version = "ver.2.7.2";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -2234,11 +2234,11 @@ sub read_fasta {
 			
 			# 配列行の処理
 			if (defined($id_key) and $line !~ /^>/) {
-				# データの整合性を確認
-				&exception::error("different line length detected: $id_key", $file) if $error_flag == 1;
-				&exception::error("different EOL code detected: $id_key", $file) if $error_flag == 2;
-				$error_flag = 1 if $row_width and $row_width != length($line);
-				$error_flag = 2 if $row_bytes and $row_bytes != $row_bytes1;
+				# データフォーマットの整合性を確認
+				&exception::error("different EOL code detected: $id_key", $file) if $error_flag == 1 and $line;
+				&exception::error("different line length detected: $id_key", $file) if $error_flag == 2 and $line;
+				$error_flag = 1 if $row_bytes and $row_bytes != $row_bytes1;
+				$error_flag = 2 if $row_width and $row_width != length($line);
 				
 				# 配列長を追加
 				$seq_length += length($line);
@@ -2252,7 +2252,7 @@ sub read_fasta {
 				$faidx{$id_key} = pack(main::faidx_template, $id_order, $id_start, $seq_length, $seq_start, $row_width, $row_bytes) and print FASTA_INDEX "$id_key\t$seq_length\t$seq_start\t$row_width\t$row_bytes\n" if defined($id_key);
 				
 				# IDの最初の空白文字の前までをハッシュキーとして取得
-				($id_key) = split(/\s/, substr($line, 1));
+				($id_key) = split(/\s/, substr($line, 1)) if $line;
 				
 				# 配列開始点を更新
 				$seq_start = tell(FASTA);
