@@ -11,7 +11,7 @@ use threads;
 # ソフトウェアを定義
 ### 編集範囲 開始 ###
 my $software = "fate.pl";	# ソフトウェアの名前
-my $version = "ver.2.7.2";	# ソフトウェアのバージョン
+my $version = "ver.2.8.0";	# ソフトウェアのバージョン
 my $note = "FATE is Framework for Annotating Translatable Exons.\n  This software annotates protein-coding regions by a classical homology-based method.";	# ソフトウェアの説明
 my $usage = "<required items> [optional items]";	# ソフトウェアの使用法 (コマンド非使用ソフトウェアの時に有効)
 ### 編集範囲 終了 ###
@@ -37,6 +37,7 @@ $option{"x"} = "\tDiscard the blast output file";
 $option{"b PATH "} = "Path to the blast output file (TSV format)";
 $option{"f STR "} = "Output format <bed|gtf> [bed]";
 $option{"n STR "} = "Prefix of each locus name [locus]";
+$option{"m INT "} = "Maximum number of blast hits to keep <1-> [500]";
 $option{"p INT "} = "Number of parallel worker threads <1-> [1]";
 $option{"t INT "} = "Output biotype (+1:functional genes, +2:truncated genes, +4:pseudogenes) <1-7> [7]";
 $option{"v INT "} = "Maximum number of candidate isoforms <1->";
@@ -145,6 +146,7 @@ sub main {
 	# 指定された共通オプションを確認
 	$opt{"f"} = lc($opt{"f"});
 	&exception::error("specify bed or gtf: -f $opt{f}") if $opt{"f"} ne "bed" and $opt{"f"} ne "gtf";
+	&exception::error("specify INT >= 1: -m $opt{m}") if $opt{"m"} !~ /^\d+$/ or $opt{"m"} < 1;
 	&exception::error("specify INT >= 1: -p $opt{p}") if $opt{"p"} !~ /^\d+$/ or $opt{"p"} < 1;
 	&exception::error("specify INT 1-7: -t $opt{t}") if $opt{"t"} !~ /^\d+$/ or $opt{"t"} < 1 or $opt{"t"} > 7;
 	&exception::error("specify INT >= 1: -v $opt{v}") if defined($opt{"v"}) and ($opt{"v"} !~ /^\d+$/ or $opt{"v"} < 1);
@@ -266,11 +268,11 @@ sub body {
 	
 	# デフォルトの処理を定義
 	my %homology_search = (
-		"blastn"       => "blastn  -num_threads $opt{p} -db $genome_file -outfmt 6 -soft_masking true -task blastn",
-		"dc-megablast" => "blastn  -num_threads $opt{p} -db $genome_file -outfmt 6 -soft_masking true -task dc-megablast",
-		"megablast"    => "blastn  -num_threads $opt{p} -db $genome_file -outfmt 6 -soft_masking true -task megablast",
-		"tblastn"      => "tblastn -num_threads $opt{p} -db $genome_file -outfmt 6 -soft_masking true",
-		"tblastn-fast" => "tblastn -num_threads $opt{p} -db $genome_file -outfmt 6 -soft_masking true -task tblastn-fast"
+		"blastn"       => "blastn  -num_threads $opt{p} -max_target_seqs $opt{m} -db $genome_file -outfmt 6 -soft_masking true -task blastn",
+		"dc-megablast" => "blastn  -num_threads $opt{p} -max_target_seqs $opt{m} -db $genome_file -outfmt 6 -soft_masking true -task dc-megablast",
+		"megablast"    => "blastn  -num_threads $opt{p} -max_target_seqs $opt{m} -db $genome_file -outfmt 6 -soft_masking true -task megablast",
+		"tblastn"      => "tblastn -num_threads $opt{p} -max_target_seqs $opt{m} -db $genome_file -outfmt 6 -soft_masking true",
+		"tblastn-fast" => "tblastn -num_threads $opt{p} -max_target_seqs $opt{m} -db $genome_file -outfmt 6 -soft_masking true -task tblastn-fast"
 	);
 	my %gene_prediction = (
 		"exonerate" => "exonerate -m protein2genome -V 0 --showalignment F --showvulgar F --showtargetgff T -r F",
@@ -1009,11 +1011,11 @@ sub body {
 	
 	# デフォルトの処理を定義 (-d指定時)
 	my %homology_search = (
-		"blastn"       => "blastn -num_threads $opt{p} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus -task blastn",
-		"dc-megablast" => "blastn -num_threads $opt{p} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus -task dc-megablast",
-		"megablast"    => "blastn -num_threads $opt{p} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus -task megablast",
-		"blastx"       => "blastx -num_threads $opt{p} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus",
-		"blastx-fast"  => "blastx -num_threads $opt{p} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus -task blastx-fast"
+		"blastn"       => "blastn -num_threads $opt{p} -max_target_seqs $opt{m} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus -task blastn",
+		"dc-megablast" => "blastn -num_threads $opt{p} -max_target_seqs $opt{m} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus -task dc-megablast",
+		"megablast"    => "blastn -num_threads $opt{p} -max_target_seqs $opt{m} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus -task megablast",
+		"blastx"       => "blastx -num_threads $opt{p} -max_target_seqs $opt{m} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus",
+		"blastx-fast"  => "blastx -num_threads $opt{p} -max_target_seqs $opt{m} -db $opt{d} -outfmt '6 std salltitles' -soft_masking true -strand plus -task blastx-fast"
 	) if $opt{"d"};
 	
 	# オプションの処理を追加
@@ -1355,8 +1357,8 @@ sub body {
 	
 	# デフォルトの処理を定義
 	my %homology_search = (
-		"blastx"       => "blastx -num_threads $opt{p} -db $ref_file -outfmt '6 std salltitles' -soft_masking true -strand $strand",
-		"blastx-fast"  => "blastx -num_threads $opt{p} -db $ref_file -outfmt '6 std salltitles' -soft_masking true -strand $strand -task blastx-fast"
+		"blastx"       => "blastx -num_threads $opt{p} -max_target_seqs $opt{m} -db $ref_file -outfmt '6 std salltitles' -soft_masking true -strand $strand",
+		"blastx-fast"  => "blastx -num_threads $opt{p} -max_target_seqs $opt{m} -db $ref_file -outfmt '6 std salltitles' -soft_masking true -strand $strand -task blastx-fast"
 	);
 	my %gene_prediction = (
 		"exonerate" => "exonerate -m protein2genome -V 0 --showalignment F --showvulgar F --showtargetgff T",

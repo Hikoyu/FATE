@@ -1,5 +1,5 @@
 ========================================
-Abridged User's Manual of FATE ver.2.7.2
+Abridged User's Manual of FATE ver.2.8.0
 ========================================
 
 Supported Operating System
@@ -58,7 +58,7 @@ $ fate.pl <command> [option] [input] [>output] [2>log]
 If you omit the command, FATE outputs its version and available commands.
 
 $ fate.pl
-fate.pl ver.2.7.1
+fate.pl ver.2.8.0
 
 Functions:
   FATE is Framework for Annotating Translatable Exons.
@@ -92,6 +92,7 @@ Options:
   -h STR 	Homology search engine <blastn|dc-megablast|megablast|tblastn|tblastn-fast> [blastn]
   -i INT 	Maximum interval length for assembling initial hits [100000]
   -l INT 	Minimum length to regard as complete CDS <0-> [0]
+  -m INT 	Maximum number of blast hits to keep <1-> [500]
   -n STR 	Prefix of each locus name [locus]
   -o INT 	Maximum overlap/gap length of query boundries for assembling initial hits [30]
   -p INT 	Number of parallel worker threads <1-> [1]
@@ -140,6 +141,7 @@ Options:
   -f STR 	Output format <bed|gtf> [bed]
   -h STR 	Homology search engine <blastn|dc-megablast|megablast|blastx|blastx-fast> [blastn]
   -k STR 	Keywords for filtering (AND[&], OR[;], BUT[!])
+  -m INT 	Maximum number of blast hits to keep <1-> [500]
   -n STR 	Prefix of each locus name [locus]
   -p INT 	Number of parallel worker threads <1-> [1]
   -r INT 	Cutoff rank of hits <1->
@@ -187,6 +189,7 @@ Options:
   -h STR 	Homology search engine <blastx|blastx-fast> [blastx]
   -k STR 	Keywords for filtering (AND[&], OR[;], BUT[!])
   -l INT 	Minimum length to regard as complete CDS <0-> [0]
+  -m INT 	Maximum number of blast hits to keep <1-> [500]
   -n STR 	Prefix of each locus name [locus]
   -p INT 	Number of parallel worker threads <1-> [1]
   -r INT 	Cutoff rank of hits <1->
